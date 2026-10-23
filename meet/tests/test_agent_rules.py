@@ -71,6 +71,12 @@ def test_vocative_person():
     assert vp("Alexander the Great was fast.", ["Alex"], "Higgs") is None
 
 
+def test_echoes():
+    line = "I'm not asking for the moon here. It's one stop. Assistant, please, just add the stop for me."
+    assert agent.echoes("Marcus, I'm not asking for the moon here. It's one stop.", line)
+    assert not agent.echoes("Done: I added the record shop as a stop on your route.", line)
+
+
 def test_facts_relevant():
     facts = ["Submissions close Saturday at 3 pm.", "The project is a video call where Higgs joins."]
     assert agent.facts_relevant("When do submissions close?", [], facts, ["Higgs", "Alex"])

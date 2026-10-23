@@ -201,7 +201,8 @@ async def decide(r, ask, samples=3, prompt="v4b"):
     Returns (speak, {"reading": first judge reading (+ wrong), "why": the transcript panel's words})."""
     (jsys, juser), (fsys, fuser) = judge_prompt(r, prompt), tv_eval.fact_prompt(r)
     jt = [asyncio.ensure_future(ask("judge", jsys, juser, i)) for i in range(samples)]
-    ft = [asyncio.ensure_future(ask("check", fsys, fuser, i)) for i in range(samples)]
+    # nothing to contradict without a fact sheet (MSI-Bench rooms: the checks then "found" contradictions anyway)
+    ft = [asyncio.ensure_future(ask("check", fsys, fuser, i)) for i in range(samples)] if r.get("facts") else []
     need = samples // 2 + 1  # this many "speak" votes decide it whatever the others say
 
     def got(t):  # a vote's JSON, None if it failed
@@ -212,7 +213,7 @@ async def decide(r, ask, samples=3, prompt="v4b"):
         if sum(judge_rule(got(t), r, prompt) for t in jt if t.done()) >= need:
             break  # decided to speak; the fact-checks only say whether it's a correction: give them a moment
     early = bool(pending)
-    _, late = await asyncio.wait(ft, timeout=0.25 if early else None)
+    _, late = await asyncio.wait(ft, timeout=0.25 if early else None) if ft else (set(), set())
     for t in list(pending) + list(late):
         t.add_done_callback(lambda f: f.exception())
     parsed = [p for p in map(got, jt) if isinstance(p, dict)]
@@ -406,6 +407,13 @@ def vocative_only(text, ai):
     """"Hey, Higgs." / "Higgs?" / "Hi Higgs!": the AI's name with at most a greeting word."""
     rest = [w for w in re.findall(r"[a-z']+", text.lower()) if w != ai.lower()]
     return ai.lower() in text.lower() and all(w in ("hey", "hi", "hello", "ok", "okay", "um", "so", "oh", "yo") for w in rest)
+
+
+def echoes(reply, line, run=6):
+    """True if the reply repeats `run`+ consecutive words of the line it answers (it's speaking as that person)."""
+    w = lambda x: re.findall(r"[a-z0-9']+", x.lower())  # noqa: E731
+    a, b = w(reply), " ".join(w(line))
+    return any(" ".join(a[i:i + run]) in b for i in range(len(a) - run + 1))
 
 
 def frame_db(pcm):
@@ -1005,6 +1013,16 @@ class ImprovedBrain:
             writer = pools["write"]
         ans = (await hedged(draft, lambda: writer.ask(convo_used, retries=0), HEDGE_S)).strip().strip('"')
         t_draft = time.perf_counter()
+        if echoes(ans, text):  # the writer continued the speaker's own words ("Marcus, I'm not asking for the moon")
+            if spec:
+                spec.speaker.cancel()
+                spec = None
+            ans = (await writer.ask(f"[Reply as {a.ai}, the AI in the call, to what {li.name} just said. Don't repeat or "
+                                    f"continue {li.name}'s words.]\n" + convo_used, retries=1)).strip().strip('"')
+            ans = re.sub(rf"^\s*{re.escape(a.ai)}\s*:\s*", "", ans, flags=re.I)
+            if echoes(ans, text):
+                ans = ""  # still not a reply: better silent than speaking as one of the people
+            t_draft = time.perf_counter()
         if VOLUNTEERS.search(ans):  # "I can handle the backend": it's an AI in a call, it can't
             if spec:
                 spec.speaker.cancel()
