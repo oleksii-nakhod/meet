@@ -187,7 +187,9 @@ def judge_rule(d, r, prompt="v4b"):
             and len(re.findall(r"[A-Za-z']+", cur)) <= 4 and not any(p.lower() in cur.lower() for p in r["people"])):
         to, d = "me", {**d, "ask": True}  # "why?", "anything else?" right after the AI spoke, or after "Higgs, thanks."
     if to == "group":
-        return d.get("ask") is True and d.get("answered") is not True and d.get("can") is True
+        can = d.get("can") is True or (CAN_FROM_FACTS and bool(r.get("facts")) and facts_relevant(
+            cur, [], r["facts"], [r["target_speaker"]] + list(r["people"])))
+        return d.get("ask") is True and d.get("answered") is not True and can
     if to != "me":
         return False
     if len(r["people"]) == 1 and len(re.findall(r"[A-Za-z']+", cur)) > 3:
@@ -332,6 +334,9 @@ STOP_ASK = re.compile(r"^(?:(?:ok(?:ay)?|hey|um|uh)[,.]?\s+)?(?:stop(?: talking)
                       r"enough|one (?:sec|second|moment))[.!]*$", re.I)
 WRITER = REPLY_SYS2
 FACT_GUARD = os.environ.get("MEET_FACT_GUARD", "0") == "1"
+# Off: a group question sharing words with the fact sheet counted as answerable gained 2 held-out lines but cost group
+# silences (Third Voice test 0.930 -> 0.906, dev 0.938 -> 0.928, dev2 0.953 -> 0.943).
+CAN_FROM_FACTS = os.environ.get("MEET_CAN_FROM_FACTS", "0") == "1"
 HEDGE_S = 0.5
 
 
