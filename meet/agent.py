@@ -172,6 +172,8 @@ def judge_rule(d, r, prompt="v4b"):
     if to == r["target_speaker"].lower():
         to = "me"
     ctx, cur = r["context_turns"], r["current_turn"]["text"]
+    if len(r["people"]) == 1 and to == "group":
+        to = "me"  # one-to-one: there is no group (the 1:1 prompt doesn't offer it; a single vote sometimes says it)
     who = vocative_person(cur, [p for p in r["people"] if p != r["current_turn"]["speaker"]], r["target_speaker"])
     if who:
         to = "person"  # "Alex, I can barely hear you.": said to Alex, however the judge read it
@@ -217,6 +219,9 @@ async def decide(r, ask, samples=3, prompt="v4b"):
     checks = [p for p in map(got, ft) if isinstance(p, dict)]
     facts_hit = [bool(p.get("contradicts")) for p in checks]
     wrong = len(facts_hit) >= need and all(facts_hit)
+    if wrong and len(re.findall(r"[A-Za-z0-9']+", r["current_turn"]["text"])) < 3 and not any(
+            p.get("wrong") is True for p in map(got, jt) if isinstance(p, dict)):
+        wrong = False  # "lol ok" can't state a wrong fact: the fact-check reacting to the context
     if wrong and FACT_GUARD and not FACTY.search(r["current_turn"]["text"]) and not any(
             p.get("wrong") is True for p in map(got, jt) if isinstance(p, dict)):
         wrong = False  # the fact-check reacting to an earlier wrong claim, not to this line ("I'll just check it.")
