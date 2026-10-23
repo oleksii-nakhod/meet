@@ -97,19 +97,27 @@ class Signals:
             q.put(None)
 
 
-def _signals_worker(flags, q, shared, ready):
+def _signals_worker(flags, q, shared, ready, parent):
     torch.set_num_threads(1)
     sig = Signals(**flags)
     ready.set()
     keys = ("p_now", "p_bcdet", "p_bc", "p_future")
     while True:
-        item = q.get()
+        try:
+            item = q.get(timeout=2.0)
+        except queue.Empty:
+            # A parent killed by a signal (a test harness's terminate(), a crash) never runs multiprocessing's exit
+            # handler, so its daemon children live on: 167 orphans held 103 GB on 2026-10-23. Leave with the parent.
+            if os.getppid() != parent:
+                break
+            continue
         if item is None:
             break
         out = sig.push(np.frombuffer(item[0], np.float32), np.frombuffer(item[1], np.float32))
         for i, k in enumerate(keys):
             if k in out:
                 shared[i] = out[k]
+        shared[4] += 1  # frames handed to the models: the parent's pushes minus this = how far behind we are
     sig.close()
 
 
@@ -126,14 +134,21 @@ class ProcSignals:
         ctx = mp.get_context("spawn")
         self.flags = {"vap": vap, "bcdet": bcdet, "bc": bc}
         self.q = ctx.Queue()
-        self.shared = ctx.Array("d", 4, lock=False)
+        self.shared = ctx.Array("d", 5, lock=False)
+        self.pushed = 0
         self.ready = ctx.Event()
-        self.proc = ctx.Process(target=_signals_worker, args=(self.flags, self.q, self.shared, self.ready), daemon=True)
+        self.proc = ctx.Process(target=_signals_worker, args=(self.flags, self.q, self.shared, self.ready, os.getpid()),
+                                daemon=True)
         self.proc.start()
         if wait:
             self.ready.wait(120)
 
+    def lag(self):
+        """Frames pushed but not yet handed to the models (each model thread may add one hop on top)."""
+        return int(self.pushed - self.shared[4])
+
     def push(self, u16, s16):
+        self.pushed += 1
         self.q.put((np.asarray(u16, np.float32).tobytes(), np.asarray(s16, np.float32).tobytes()))
         return {k: self.shared[i] for i, k in enumerate(("p_now", "p_bcdet", "p_bc", "p_future"))
                 if self.flags[{"p_now": "vap", "p_bcdet": "bcdet", "p_bc": "bc", "p_future": "vap"}[k]]}

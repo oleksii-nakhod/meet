@@ -348,6 +348,35 @@ def frame_db(pcm):
     return float(20 * np.log10(np.sqrt(np.mean(x * x)) + 1e-9))
 
 
+class Spares:
+    """Turn-taking model processes loaded ahead of time. Loading one takes seconds (longer on a busy machine), and
+    until it's ready a person's lines end on the 0.8 s fallback instead of 0.3 s: in a loaded test run, 29 of 48 lines.
+    New listeners (a join, a mode switch) take a ready one; a replacement starts loading at once."""
+
+    def __init__(self, n):
+        self.n, self.ready = n, deque()
+
+    def _spawn(self):
+        from mmhm.models import ProcSignals
+        return ProcSignals(vap=True, bcdet=True, bc=False, wait=False)
+
+    def fill(self):
+        while len(self.ready) < self.n:
+            self.ready.append(self._spawn())
+
+    def take(self):
+        s = next((x for x in self.ready if x.ready.is_set()), None) or (self.ready[0] if self.ready else None)
+        if s is not None:
+            self.ready.remove(s)
+        else:
+            s = self._spawn()
+        self.fill()
+        return s
+
+
+SPARES = Spares(int(os.environ.get("MEET_SPARE_SIGNALS", "2")))
+
+
 def to16(pcm):
     return resample_poly(pcm.astype(np.float32) / 32768, 2, 3).astype(np.float32)
 
@@ -535,8 +564,7 @@ class Listener:
     async def start(self):
         self._reopen()
         if SIGNALS:
-            from mmhm.models import ProcSignals
-            self.signals = ProcSignals(vap=True, bcdet=True, bc=False, wait=False)
+            self.signals = SPARES.take()
 
     def _reopen(self):
         """(Re)open the transcription session in the background, retrying: an open can fail under load, and Higgs
@@ -624,6 +652,8 @@ class Listener:
             if act == "commit" and self.sent >= int(self.p.min_turn / TICK):
                 self.streaming, self.sent = False, 0
                 self.t_speech_end = time.perf_counter() - self.gate.silence
+                self.commit_info = {"why": self.gate.why, "p_now": None if self.p_now is None else round(self.p_now, 2),
+                                    "lag": self.signals.lag() if self.signals is not None else None}
                 if self.open:
                     asyncio.ensure_future(self._transcribe(time.perf_counter()))
                 else:
@@ -885,7 +915,7 @@ class ImprovedBrain:
         if a.avatar:  # render ahead, into a buffer: by the time the floor opens the face is (nearly) ready
             self.pending.video = False
             self.pending.render = asyncio.ensure_future(self._render(self.pending))
-        self.pending.marks.update(speech_end=getattr(li, "t_speech_end", t_end), commit=t_end,
+        self.pending.marks.update(gate=getattr(li, "commit_info", None), speech_end=getattr(li, "t_speech_end", t_end), commit=t_end,
                                   transcript=getattr(li, "t_transcript", t_end), decided=t_decided, draft=t_draft,
                                   speculated=spec is not None)
         await a.status("thinking")
@@ -964,6 +994,7 @@ class ImprovedBrain:
                                                             "render", "video") if k in m}
                 timing["play"] = round(now - t0, 2)
                 timing["speculated"] = bool(m.get("speculated"))
+                timing["gate"] = m.get("gate")
                 await self.a.status("speaking", after_s=round(now - r.t_end, 2), why=r.play_why, timing=timing)
                 await self.a.room.event({"type": "ai_say", "text": r.text})
             gains = []
@@ -1065,6 +1096,8 @@ class HiggsAgent:
 
     def __init__(self, room):
         self.room = room
+        if SIGNALS:
+            SPARES.fill()  # the first room starts loading turn-taking models for the people who will join
         b = room.brief
         self.ai, self.setting, self.facts = b.get("ai") or "Higgs", b.get("setting") or "a meeting", list(b.get("facts") or [])
         self.history = []
