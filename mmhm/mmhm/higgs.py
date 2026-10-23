@@ -169,6 +169,8 @@ class Session:
                     if w[0](ev):
                         w[1].set_result((t, ev))
                         self._waiters.remove(w)
+            # a clean close (1000: idle timeout after 5 min without speech, max duration) ends the loop without raising
+            self.close_code = self.ws.close_code or 1000
         except websockets.ConnectionClosed as e:
             self.close_code = e.code
         except asyncio.CancelledError:

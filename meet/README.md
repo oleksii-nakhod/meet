@@ -18,13 +18,27 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
 - **default:** plain Higgs Realtime as Boson's docs prescribe (`mmhm.engine.Engine(mode="server_vad")`,
   unchanged). It hears everyone mixed together, answers after every turn, and stops on any sound.
 - **improved:** Third Voice decides *whether* to speak and Mm-hm decides *when*.
-  - **Hearing:** each person has their own transcription session, so names are known.
-  - **Line end:** a line ends after 0.45 s of silence when the per-person turn-taking model (VAP) agrees the person
-    is done; mid-thought pauses get held.
-  - **Deciding:** v4b judges every line (3 judge samples + 3 fact-checks, `tv_eval.DEC_SYS4`). A correction is
-    rewritten to say what's wrong.
+  - **Hearing:** each person has their own transcription session (`language: en` hint), so names are known. Sessions
+    reconnect on their own: Higgs closes a Realtime session after 5 minutes without speech, and opens can fail
+    under load. Higgs's own voice leaking back through someone's speakers (more than 25 dB below what it is playing)
+    is ignored, so it neither interrupts Higgs nor becomes a line.
+  - **Line end:** a line ends after 0.30 s of silence when the per-person turn-taking model (VAP) agrees the person
+    is done; mid-thought pauses get held. If the person goes on, the pieces merge into one line (the transcript
+    panel replaces the fragment).
+  - **Before judging** (`prefilter`): a misheard name is repaired ("Pigs, how should we…" → "Higgs, …"); backchannels
+    ("mm-hm", "yeah", "got it"), fillers ("um", "so the, uh,"), unfinished fragments and "stop / hold on" are logged
+    but not judged or answered, and don't make a reply someone else is waiting for stale.
+  - **Deciding:** judge v5 (`agent.DEC_SYS5`: Third Voice's v4b plus greetings, the AI's own name, follow-ups and an
+    explicit one-to-one mode) on every line, 3 judge samples + 3 fact-checks. It decides as soon as 2 of 3 judges say
+    speak; a failed Higgs request is an abstention, not a "no".
+  - **Writing:** the reply is drafted while the judge decides, and when the line looks like it wants a reply (one-to-one,
+    the AI's name, a question) its speech starts streaming then too. The writer gets the fact sheet only when the line
+    is about it (it recited it in small talk otherwise); a correction has its own draft; a slow draft gets a second
+    request after 0.5 s; an interrupted turn is marked `[interrupted]` in the history so the next reply answers the
+    interruption.
   - **Taking the floor:** a reply starts only when the room has been quiet for 0.35 s and nobody who just spoke
-    still holds the floor. It is dropped if someone spoke after its line, or if it's older than 3.5 s.
+    still holds the floor. It is dropped if someone spoke after its line, or if it couldn't start within 3.5 s while
+    people kept talking (8 s in a quiet room). Every reply that was decided but not spoken logs `reply_skipped`.
   - **While Higgs talks:** a listener's "mm-hm" only ducks it. A real interruption stops it, and Higgs remembers
     only what was heard (`floor.py`, ported from `mmhm/engine.py`; 16 unit tests).
 - **Avatar** (improved mode, off by default): the reply is rendered by Higgs Avatar once its speech is ready, and
