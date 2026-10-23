@@ -99,7 +99,8 @@ bystander's voice): cues answered 10/18 → 21/24 and 22/24 in two final runs, p
 - Past Higgs's 5-minute idle timeout (`--set 4`): improved 6/6, default 6/6 (was 2/6: the session never came back).
 - Mode switch mid-call (`--set 5`): answers after both switches, and the history carries over.
 - With the Avatar (`--set 3`): 8/8; the face says "Hmm." ~1.5 s after the line, the answer starts ~4.0 s after it
-  (a long list of numbers: ~8 s).
+  (a long list of numbers: ~8 s). B2 in 3 Chromium pages with the Avatar: 5/6 + 24/25, and every page played all 10
+  face streams ("Hmm." + answer for 5 replies), no player errors.
 - Real meetings (`tests/ami_meeting.py`, AMI, 4 real voices on 4 bots, nobody talks to the AI): ES2009c 10 min,
   142 lines, Higgs spoke once (unnecessary; that kind of line is now silent, 146 lines / 0 on the final code);
   ES2014c 10 min, 81 lines, never; ES2009c minutes 10–30, 342 lines, never (6 budget corrections it would have made,
