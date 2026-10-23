@@ -1106,7 +1106,9 @@ class ImprovedBrain:
         r = self.pending
         if r is not None and "audio" not in r.marks and len(r.audio) >= N * 2:
             r.marks["audio"] = time.perf_counter()
-        if self.playing is None and r is not None and r.closed and len(r.audio) >= N * 2:
+        # start with 200 ms of speech in hand (or the whole reply): TTS sometimes streams slower than it plays
+        if self.playing is None and r is not None and r.closed and (len(r.audio) >= N * 2 * 10
+                                                                      or (r.done and len(r.audio) >= N * 2)):
             li = r.listener
             act, why = self.take.may_play(t, {"p_now": li.p_now, "silence": li.gate.silence}, anyone, r.line_text,
                                           self.moved_on(r))

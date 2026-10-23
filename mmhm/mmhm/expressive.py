@@ -7,6 +7,7 @@ order, recording which samples belong to which sentence (so an interruption can 
 was actually heard)."""
 import re
 import threading
+import time
 
 import requests
 
@@ -98,33 +99,60 @@ class SentenceSpeaker:
             self.queue.append(voiced(s))
             self.cv.notify()
 
+    PIPELINE = 2  # TTS requests in flight: the next sentence is fetched while this one streams
+
+    def _fetch(self, s, job):
+        """Stream one sentence's TTS into job["buf"] (job["done"] when it finished, failed or was cancelled)."""
+        try:
+            with requests.post(f"{BASE}/audio/speech", headers=HDR, stream=True, timeout=60, json={
+                    "model": "higgs-tts-3", "input": s, "voice": self.voice, "response_format": "pcm",
+                    "stream": True}) as r:
+                r.raise_for_status()
+                odd = b""
+                for chunk in r.iter_content(4096):
+                    if self.cancelled:
+                        break
+                    chunk = odd + chunk
+                    cut = len(chunk) - len(chunk) % 2
+                    with job["lock"]:
+                        job["buf"].extend(chunk[:cut])
+                    odd = chunk[cut:]
+        except requests.RequestException:
+            pass
+        finally:
+            job["done"] = True
+
     def _run(self):
+        """Sentences are fetched up to PIPELINE at a time and copied into the shared buffer in order. (One at a time,
+        a short first clause and a slow next request left a gap in the middle of a reply: 4 of 51 replies, up to 1.8 s,
+        on 2026-10-23.)"""
+        jobs = []
         while True:
             with self.cv:
-                while not self.queue and not self.closed:
-                    self.cv.wait()
-                if self.cancelled or (not self.queue and self.closed):
+                while self.queue and not self.cancelled and sum(not j["done"] for j in jobs) < self.PIPELINE:
+                    job = {"s": self.queue.pop(0), "buf": bytearray(), "done": False, "lock": threading.Lock(),
+                           "start": None, "copied": 0}
+                    jobs.append(job)
+                    threading.Thread(target=self._fetch, args=(job["s"], job), daemon=True).start()
+                if self.cancelled or (not jobs and not self.queue and self.closed):
                     break
-                s = self.queue.pop(0)
-            start = len(self.audio) // 2
-            try:
-                with requests.post(f"{BASE}/audio/speech", headers=HDR, stream=True, timeout=60, json={
-                        "model": "higgs-tts-3", "input": s, "voice": self.voice, "response_format": "pcm",
-                        "stream": True}) as r:
-                    r.raise_for_status()
-                    odd = b""
-                    for chunk in r.iter_content(4096):
-                        if self.cancelled:
-                            break
-                        chunk = odd + chunk
-                        cut = len(chunk) - len(chunk) % 2
-                        self.audio.extend(chunk[:cut])
-                        odd = chunk[cut:]
-            except requests.RequestException:
-                pass
-            # a short breath between sentences
-            self.audio.extend(bytes(int(0.12 * self.sr) * 2))
-            self.segments.append((start, len(self.audio) // 2, spoken(s)))
+                if not jobs:
+                    self.cv.wait()
+                    continue
+            j = jobs[0]
+            if j["start"] is None:
+                j["start"] = len(self.audio) // 2
+            with j["lock"]:
+                new = bytes(j["buf"][j["copied"]:])
+                j["copied"] += len(new)
+            if new:
+                self.audio.extend(new)
+            if j["done"] and j["copied"] >= len(j["buf"]):
+                self.audio.extend(bytes(int(0.12 * self.sr) * 2))  # a short breath between sentences
+                self.segments.append((j["start"], len(self.audio) // 2, spoken(j["s"])))
+                jobs.pop(0)
+                continue
+            time.sleep(0.01)
         self.on_done()
 
     def heard_text(self, samples_played):
