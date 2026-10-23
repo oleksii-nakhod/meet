@@ -99,7 +99,11 @@ bystander's voice): cues answered 10/18 → 21/24 and 22/24 in two final runs, p
 - With the Avatar (`--set 3`): 8/8; the face says "Hmm." ~1.5 s after the line, the answer starts ~4.0 s after it
   (a long list of numbers: ~8 s).
 - Real meetings (`tests/ami_meeting.py`, AMI, 4 real voices on 4 bots, nobody talks to the AI): ES2009c 10 min,
-  142 lines, Higgs spoke once (unnecessary; that kind of line is now silent); ES2014c 10 min, 81 lines, never.
+  142 lines, Higgs spoke once (unnecessary; that kind of line is now silent, 146 lines / 0 on the final code);
+  ES2014c 10 min, 81 lines, never; ES2009c minutes 10–30, 342 lines, never (6 budget corrections it would have made,
+  e.g. a "17.50 euro" estimate against the 12.50 cap, found no gap in the talk and were dropped). With a fifth person
+  asking the brief's questions in the lulls (`--ask 5`, ES2014c minutes 10–25): the 3 put to Higgs by name answered
+  correctly, 1.4–5.9 s after the question; the unaddressed group question and wrong fact lost to the chatter.
 
 Env: `MEET_SAMPLES` (judge samples per line; default 1 in a one-to-one call, 3 with more people), `MEET_BUDGET`
 (Higgs requests per server run, default 30000; the room is told when it runs out), `MEET_PROMPT` (judge, default
