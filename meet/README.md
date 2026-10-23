@@ -43,9 +43,10 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
     only what was heard (`floor.py`, ported from `mmhm/engine.py`; 16 unit tests).
 - **Avatar** (improved mode, off by default): replies are one sentence; Higgs Avatar renders it as soon as its speech
   is ready, into a buffer, and video and audio are released together when the floor opens. A reply is ~4.1 s after
-  the line (median of 9 in `tests/scenarios.py --set 3`; ~1.6 s without the face). Only someone taking the floor
-  (0.8 s of speech) cancels a reply while its face renders; a "mm" doesn't. A pre-rendered idle loop plays between
-  replies.
+  the line (median of 9 in `tests/scenarios.py --set 3`; ~1.6 s without the face), so a pre-rendered "Hmm." in the
+  same face and voice plays ~1.5 s after the line while it renders (`MEET_AVATAR_FILLER=0` turns it off). Only
+  someone taking the floor (0.8 s of speech) cancels a reply while its face renders; a "mm" doesn't. A pre-rendered
+  idle loop plays between replies.
 
 Scripted test (`tests/meeting_run.py`): roommates meeting B2 from Third Voice's test set, 3 people, 32 lines, 6
 where the AI should speak. Each person's lines are their own fake microphone in headless Chromium, so the
@@ -78,17 +79,25 @@ backchannels and interruptions, quiet ones at −6/−10 dB, other AI names and 
 | | steps right | reply heard after the line (median, p90) |
 |---|---|---|
 | improved, start of the night (set 1 only) | 29/49 | 1.85 s, 2.44 s |
-| improved, end of the night (`full4`) | **97/98** | **1.54 s, 2.27 s** |
-| default (plain Higgs), same scenes | 59/98 | 1.26 s, 1.42 s |
+| improved, end of the night (`final_all`, sets 1+2 incl. quiet mics) | **99/100** | **1.57 s, 2.53 s** |
+| default (plain Higgs), same scenes | 64/104 | 1.26 s, 1.42 s |
+
+Also at the end of the night: mode switching 6/6, accents (voice-library Indian English / Canadian voices) 9/9,
+past the 5-minute idle timeout 6/6 (default 6/6), Avatar 8/8, three rooms on one server 25/25 with 0 dropped frames.
+MSI-Bench through the call (`tests/msi_meeting.py`, 24 cases, rendered speech with distance, reverb, ambience, a
+bystander's voice): cues answered 10/18 → 21/24 and 22/24 in two final runs, premature replies 0 and 2/24, median
+1.0 s after the cue. The B2 browser meeting: 5/6 speak, 25/26 silent.
 
 - Backchannels while Higgs talks: improved kept talking 7/7; default stopped 5/7 and then answered the "mm-hm" as a
   new turn ~1.2 s later. Whether a backchannel stops default Higgs depends on the sound: clear "Mm-hm.", "Uh-huh.",
   "Yeah." and 2 real AMI ones stopped it every time; 3 other real AMI ones (soft hums) never did. Through a real
-  Chrome mic path (`tests/browser_bc.py`): default 5/8 (4/8 at −10 dB), improved 0/8 with all 8 answers delivered.
+  Chrome mic path (`tests/browser_bc.py`): default 5/8 and 7/8 (4/8 at −10 dB), improved 0/8 with all 8 answers
+  delivered.
 - Real interruptions (incl. AMI ones at −6 dB): improved stopped every time (~0.44 s).
 - Past Higgs's 5-minute idle timeout (`--set 4`): improved 6/6, default 6/6 (was 2/6: the session never came back).
 - Mode switch mid-call (`--set 5`): answers after both switches, and the history carries over.
-- With the Avatar (`--set 3`): 10/10, reply heard ~4.1 s after the line (a long list of numbers: ~8 s).
+- With the Avatar (`--set 3`): 8/8; the face says "Hmm." ~1.5 s after the line, the answer starts ~4.0 s after it
+  (a long list of numbers: ~8 s).
 - Real meetings (`tests/ami_meeting.py`, AMI, 4 real voices on 4 bots, nobody talks to the AI): ES2009c 10 min,
   142 lines, Higgs spoke once (unnecessary; that kind of line is now silent); ES2014c 10 min, 81 lines, never.
 
@@ -112,7 +121,8 @@ silence rules), `MEET_VOICE`.
 - **Showing default vs improved live:** default Higgs is reliably derailed by a clear "yeah" or "uh-huh" while it
   talks (it stops and answers the backchannel), by a mid-sentence thinking pause (it talks over it), and by people
   talking to each other (it answers them). A soft hummed "mm" often doesn't trigger its voice detector at all.
-- **Avatar:** replies are one sentence; the face says "Hmm." ~2.4 s after the line and the answer follows ~2 s later.
+- **Avatar:** replies are one sentence; the face says "Hmm." ~1.5 s after the line and the answer follows ~2.5 s
+  later (it waits for a quiet moment if someone talks into that pause).
 
 ## Rooms
 
