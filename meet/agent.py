@@ -352,6 +352,27 @@ async def hedged(task, again, delay):
     return ""
 
 
+AVATAR_FILLER = os.environ.get("MEET_AVATAR_FILLER", "1") == "1"  # "Hmm." while the face renders (see _release)
+FILLERS = {"clips": None, "loading": False}
+
+
+def load_fillers():
+    """Build/load the Avatar thinking clips in a background thread, once."""
+    if FILLERS["clips"] is not None or FILLERS["loading"]:
+        return
+    FILLERS["loading"] = True
+
+    def work():
+        try:
+            FILLERS["clips"] = avatar.filler_assets(VOICE)
+        except Exception as e:  # noqa: BLE001  (no fillers: the reply just waits for its face)
+            print(f"avatar fillers: {e!r}", flush=True)
+            FILLERS["clips"] = []
+        finally:
+            FILLERS["loading"] = False
+    threading.Thread(target=work, daemon=True).start()
+
+
 ECHO_DB = float(os.environ.get("MEET_ECHO_DB", "25"))  # quieter than Higgs's output by this much while it talks: echo
 
 
@@ -775,6 +796,9 @@ class Reply:
         self.vbuf = []           # its video chunks, held until the reply is released to the room
         self.released = False    # the floor opened: chunks go to everyone as they come
         self.vstarted = False    # avatar_start sent
+        self.filler = None       # [pcm, pos] of a thinking clip playing while this reply's face renders
+        self.filler_done = False
+        self.correction = False
         self.cancel = False
         self.started = False     # first audio frame sent
         self.marks = {"created": time.perf_counter()}  # when each stage finished (perf_counter), for timing logs
@@ -1020,6 +1044,7 @@ class ImprovedBrain:
             self.pending = Reply(line_id, li, text, ans, t_end)
         self.pending.vocative = vocative_only(text, a.ai)
         self.pending.addressed = addressed
+        self.pending.correction = bool(why.get("wrong"))
         if a.avatar:  # render ahead, into a buffer: by the time the floor opens the face is (nearly) ready
             self.pending.video = False
             self.pending.render = asyncio.ensure_future(self._render(self.pending))
@@ -1090,6 +1115,19 @@ class ImprovedBrain:
         r = self.playing
         if r is not None and not r.video and not self.a.avatar:
             r.video = True  # the avatar was switched off while this reply waited for its face: just speak
+        if r is not None and r.filler is not None:  # the thinking clip, while the reply's face renders
+            pcm, pos = r.filler
+            seg = pcm[pos:pos + N]
+            if len(seg):
+                out = np.zeros(N, np.int16)
+                out[:len(seg)] = seg
+                r.filler[1] = pos + N
+                self.last_out = out
+                if not r.started:
+                    r.marks.setdefault("filler", time.perf_counter())
+                return out
+            r.filler, r.filler_done = None, True
+            await self._release(r)
         if r is not None and not r.video:
             taker = next((li for li in self.listeners.values() if li.run >= FLOOR_POLICY.interrupt_max), None)
             if taker or self.moved_on(r):  # someone took the floor while the face rendered (a "mm" doesn't)
@@ -1108,7 +1146,7 @@ class ImprovedBrain:
                 m, now = r.marks, time.perf_counter()
                 t0 = m.get("speech_end", r.t_end)
                 timing = {k: round(m[k] - t0, 2) for k in ("commit", "transcript", "decided", "draft", "created", "audio",
-                                                            "render", "video") if k in m}
+                                                            "render", "filler", "video") if k in m}
                 timing["play"] = round(now - t0, 2)
                 timing["speculated"] = bool(m.get("speculated"))
                 timing["gate"] = m.get("gate")
@@ -1192,7 +1230,17 @@ class ImprovedBrain:
         r.video = True  # the audio may start: the face is moving on everyone's screen
 
     async def _release(self, r):
-        """The floor opened for this reply: send the video rendered so far; the rest follows as it comes."""
+        """The floor opened for this reply: send the video rendered so far; the rest follows as it comes. If none is
+        ready yet (the Avatar's first frame takes ~1.5 s after the speech is done), a pre-rendered "Hmm." covers the
+        wait: its clip plays now, and this reply's video stays buffered until the clip has been heard."""
+        clips = FILLERS["clips"] or []
+        if not r.vbuf and clips and r.filler is None and not r.filler_done:
+            text, pcm, mp4 = clips[0] if r.correction else clips[int(time.time()) % len(clips)]
+            r.filler = [pcm, 0]
+            await self.a.room.avatar_start(avatar.MIME)
+            await self.a.room.send_avatar_chunk(mp4)
+            await self.a.room.avatar_stop()
+            return
         r.released = True
         if r.vbuf:
             chunks, r.vbuf = r.vbuf, []
@@ -1343,6 +1391,8 @@ class HiggsAgent:
     def set_avatar(self, on):
         """Improved mode only: plain Realtime audio arrives in bursts and has no reply boundary to render on."""
         self.avatar = bool(on)
+        if self.avatar and AVATAR_FILLER:
+            load_fillers()
         if self.avatar:
             asyncio.ensure_future(self.room.avatar_idle(avatar.IDLE_URL))
         if self.avatar and self.mode == "default":

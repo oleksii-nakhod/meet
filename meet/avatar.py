@@ -45,3 +45,29 @@ def render(pcm, on_chunk, cancelled):
                 return
             if chunk:
                 on_chunk(chunk)
+
+
+FILLER_TEXTS = ["Hmm.", "Let's see."]
+FILLER_DIR = os.path.join(HERE, "out", "avatar_fillers")
+
+
+def filler_assets(voice):
+    """[(text, pcm int16, fMP4 bytes)] for the thinking sounds that cover the Avatar's render wait, rendered once
+    (TTS in `voice` + this face) and cached in out/avatar_fillers/. Blocking (a few seconds per clip the first time)."""
+    import numpy as np
+    from mmhm.higgs import trim, tts
+    os.makedirs(FILLER_DIR, exist_ok=True)
+    out = []
+    for i, text in enumerate(FILLER_TEXTS):
+        pcm_path, mp4_path = os.path.join(FILLER_DIR, f"{voice}_{i}.pcm"), os.path.join(FILLER_DIR, f"{voice}_{i}.mp4")
+        if not (os.path.exists(pcm_path) and os.path.exists(mp4_path)):
+            pcm = trim(tts(text, voice=voice)[0])
+            pcm = np.concatenate([pcm, np.zeros(SR // 10, np.int16)])
+            chunks = []
+            render(pcm, chunks.append, lambda: False)
+            open(mp4_path + ".tmp", "wb").write(b"".join(chunks))
+            open(pcm_path + ".tmp", "wb").write(pcm.tobytes())
+            os.replace(mp4_path + ".tmp", mp4_path)
+            os.replace(pcm_path + ".tmp", pcm_path)
+        out.append((text, np.frombuffer(open(pcm_path, "rb").read(), np.int16), open(mp4_path, "rb").read()))
+    return out

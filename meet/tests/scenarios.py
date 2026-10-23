@@ -138,8 +138,9 @@ SCENARIOS3 = [  # the Avatar on (improved mode only): audio waits for the face's
         ("say", "Alex", "Higgs, when do submissions close?", "reply"),
         ("say", "Priya", "Higgs, how much is innovation worth?", "reply", {"then_cue": ("Alex", "Mm.", 1.0)})]),
     dict(name="av_bc", avatar=True, modes=("improved",), people=["Alex"], steps=[
-        ("talk_over", "Alex", LONG_Q, ("Alex", "Mm-hm."), "continue"),
-        ("talk_over", "Alex", "Higgs, what's the riskiest part of our plan?", ("Alex", "Wait, sorry, one question."), "stop")]),
+        ("talk_over", "Alex", LONG_Q, ("Alex", "Mm-hm."), "continue", {"at": 3.6}),  # after "Hmm.", into the answer
+        ("talk_over", "Alex", "Higgs, what's the riskiest part of our plan?", ("Alex", "Wait, sorry, one question."), "stop",
+         {"at": 3.6})]),
 ]
 
 SCENARIOS4 = [  # long: past Higgs's 5-minute idle timeout (session.idle_timeout), then talk again
