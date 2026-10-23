@@ -22,12 +22,11 @@ import time
 from collections import deque
 
 import numpy as np
-from scipy.signal import resample_poly
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "mmhm"))
 sys.path.insert(0, os.path.join(HERE, "..", "third_voice"))  # tv_eval, retrieve
-from mmhm.engine import INCOMPLETE, N, TICK, Engine, Policy, VAD  # noqa: E402
+from mmhm.engine import INCOMPLETE, N, TICK, Engine, Policy, VAD, to16k  # noqa: E402
 from mmhm.expressive import SentenceSpeaker  # noqa: E402
 from mmhm.higgs import SR, Session  # noqa: E402
 
@@ -409,11 +408,11 @@ class Spares:
 
 SPARES = Spares(int(os.environ.get("MEET_SPARE_SIGNALS", "2")))
 if SIGNALS:  # import torch + MaAI now, at server start: done during the first call it stalled every room for ~5 s
-    import mmhm.models  # noqa: E402,F401
+    import mmhm.models  # noqa: F401
 
 
 def to16(pcm):
-    return resample_poly(pcm.astype(np.float32) / 32768, 2, 3).astype(np.float32)
+    return to16k(pcm.astype(np.float32) / 32768)
 
 
 class Pool:
@@ -1204,7 +1203,7 @@ class HiggsAgent:
         self.gen = 0             # bumped by every launch / switch / stop
         self.errors_t = 0.0      # last ai_error event from a failing tick (rate-limited)
         self.told_budget = False
-        self.stats = {"dropped": 0, "late_max": 0.0, "catchup": 0}  # input frames lost, worst lateness, catch-up ticks
+        self.stats = {"dropped": 0, "late_max": 0.0, "catchup": 0, "ticks": 0, "tick_ms_sum": 0.0, "tick_ms_max": 0.0}  # input frames lost, worst lateness, catch-up ticks
         self.avatar = bool(getattr(room, "avatar", False))
 
     def names(self):
@@ -1263,7 +1262,9 @@ class HiggsAgent:
         self._launch()
 
     async def stop(self):
-        await self.room.event({"type": "loop_stats", **self.stats})
+        st = dict(self.stats)
+        st["tick_ms_mean"] = round(st.pop("tick_ms_sum") / max(1, st["ticks"]), 2)
+        await self.room.event({"type": "loop_stats", **st})
         self.running = False
         self.gen += 1
         if self.task:
@@ -1346,7 +1347,12 @@ class HiggsAgent:
                 brain = None
             if brain is not None:
                 try:
+                    t_tick = time.perf_counter()
                     out = await brain.tick(frames)
+                    dt = time.perf_counter() - t_tick
+                    self.stats["ticks"] += 1
+                    self.stats["tick_ms_sum"] += dt * 1000
+                    self.stats["tick_ms_max"] = max(self.stats["tick_ms_max"], round(dt * 1000, 1))
                 except Exception as e:  # noqa: BLE001  (keep the room alive; the log says what broke)
                     if time.perf_counter() - self.errors_t > 5.0:
                         self.errors_t = time.perf_counter()

@@ -34,6 +34,15 @@ from .higgs import SR, Session
 
 TICK = 0.02
 N = int(SR * TICK)  # 480 samples at 24 kHz
+# resample_poly(x, 2, 3)'s own low-pass filter, designed once: it designs it again on every call otherwise (271 vs 52 us
+# per 20 ms frame; with 9 people in a meeting server that was a quarter of the tick). Same output (max diff 4e-8).
+from scipy.signal import firwin  # noqa: E402
+_H_24_16 = firwin(2 * 10 * 3 + 1, 1.0 / 3, window=("kaiser", 5.0))
+
+
+def to16k(x):
+    """float32 audio at 24 kHz -> 16 kHz (the turn-taking models' rate)."""
+    return resample_poly(x, 2, 3, window=_H_24_16).astype(np.float32)
 
 
 # A turn that ends on one of these words is almost never finished ("...play the", "...wanted to", "um").
@@ -351,12 +360,12 @@ class Engine:
             self.bc_out = (clip, pos + N) if pos + N < len(clip) else None
 
         if self.signals is not None and self.mode == "mmhm":
-            u16 = resample_poly(mic.astype(np.float32) / 32768, 2, 3).astype(np.float32)
+            u16 = to16k(mic.astype(np.float32) / 32768)
             if not speaking:
                 # noise gate: in a room full of other voices the turn-taking model hears "speech" in the user's
                 # channel all the time and never lets them finish; show it silence between the user's words
                 u16 *= 0.05
-            s16 = resample_poly(out.astype(np.float32) / 32768, 2, 3).astype(np.float32)
+            s16 = to16k(out.astype(np.float32) / 32768)
             self.sig = self.signals.push(u16, s16)
 
         if self.mode == "mmhm":
