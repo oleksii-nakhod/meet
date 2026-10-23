@@ -28,6 +28,8 @@ def test_prefilter():
     assert pf("Mm-hm.") == "backchannel" and pf("Yeah, yeah.") == "backchannel" and pf("Got it.") == "backchannel"
     assert pf("Yeah.", [("Higgs", "Want me to go on?")]) is None  # answers the AI's question
     assert pf("Yeah?") is None
+    assert pf("Yes.", [("Higgs", "I can list them all. Let me know if you want that.")]) is None  # accepts an offer
+    assert pf("Okay.", [("Higgs", "The deadline is Saturday at 3 pm.")]) == "backchannel"
     assert pf("um") == "filler" and pf("so the, uh, the") == "filler"
     assert pf("so basically what i'm trying to") == "unfinished"
     assert pf("Higgs, stop.") == "stop" and pf("Pigs stop.") == "stop" and pf("Hold on.") == "stop"

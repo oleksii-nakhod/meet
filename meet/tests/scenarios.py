@@ -508,7 +508,9 @@ async def main_async(a):
                     if isinstance(p, str):
                         texts.add((p, VOICES[who]))
     await asyncio.gather(*[asyncio.to_thread(clip, t, v) for t, v in texts])
-    servers = [start_server(a.port + i, {"MEET_SAMPLES": str(a.samples)} if a.samples else {}) for i in range(a.par)]
+    servers = [start_server(a.port + i, {"MEET_SAMPLES": str(a.samples)} if a.samples else {})
+               for i in range(a.servers or a.par)]
+    servers = [servers[i % len(servers)] for i in range(a.par)]  # --servers 1 --par 3: three rooms on one server
     q = asyncio.Queue()
     for item in todo:
         q.put_nowait(item)
@@ -526,7 +528,7 @@ async def main_async(a):
     try:
         await asyncio.gather(*[worker(base) for _, base in servers])
     finally:
-        for p, _ in servers:
+        for p in {id(p): p for p, _ in servers}.values():
             p.terminate()
     summ = {}
     for r in results:
@@ -542,6 +544,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--modes", nargs="+", default=["improved", "default"])
     ap.add_argument("--only", nargs="*")
+    ap.add_argument("--servers", type=int, default=0, help="servers to spread the rooms over (default: one per room)")
     ap.add_argument("--set", default="1", choices=["1", "2", "3", "4", "5", "all"])
     ap.add_argument("--par", type=int, default=4)
     ap.add_argument("--port", type=int, default=8641)

@@ -225,6 +225,7 @@ BACKCHANNEL = set("""mm mmm mhm mm-hm mmhm hm hmm uh-huh uh huh uhhuh aha ah oh 
 cool nice wow true exactly totally ha haha lol i see got it gotcha alright all""".split())
 
 
+OFFER = re.compile(r"\b(let me know|want me to|shall I|should I|would you like|do you want|if you(?:'d)? like)\b", re.I)
 FILLERS = set("um umm uh uhh er erm hmm hm mm eh ah like well".split())
 # words no English sentence ends on (engine.INCOMPLETE is broader: "go on", "about that" end there; it only delays)
 DANGLING = set("the a an to of and but or because if my your our their than um uh".split())
@@ -283,7 +284,8 @@ def prefilter(text, ai, history, people=()):
     bare = re.sub(rf"^{re.escape(ai)}[,.!]?\s*|[,.!]?\s*{re.escape(ai)}[.!]*$", "", text.strip(), flags=re.I)
     if STOP_ASK.match(bare):
         return text, "stop"  # "Higgs, stop.", "hold on": wants quiet, not an answer (barge-in already stopped it)
-    answers_me = bool(history) and history[-1]["speaker"] == ai and history[-1]["text"].rstrip().endswith("?")
+    last = history[-1]["text"] if history and history[-1]["speaker"] == ai else ""
+    answers_me = last.rstrip().endswith("?") or bool(OFFER.search(last))  # "Want me to go on?" / "Let me know if..."
     if backchannel(text) and not answers_me:
         return text, "backchannel"
     words = re.findall(r"[a-z][a-z'-]*", text.lower())

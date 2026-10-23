@@ -65,8 +65,38 @@ twenty-five…". Improved misses: what "E24" means (a question only the fact she
     python tests/meeting_run.py --mode improved [--avatar] [--switch-at 90]   # real Higgs calls (~300 per run)
     python -m pytest tests/test_floor.py                # timing logic, no API
 
-Env: `MEET_SAMPLES` (judge samples per line, default 3), `MEET_BUDGET` (Higgs requests per server run, default
-5000), `MEET_SIGNALS=0` (no per-person turn-taking models: timing falls back to silence rules), `MEET_VOICE`.
+(This table is from 2026-10-22. Rerun 2026-10-23 with everything below: improved 4/6, 25/26, all 32 lines heard,
+replies 1.1–2.7 s; the one extra "speak" was a garbled "Wren-five." and was dropped unheard.)
+
+### Interactive scenarios (2026-10-23, `tests/scenarios.py`)
+
+37 scenes / 98 scored steps: one-to-one and 2–3 person calls; greetings, follow-ups, statements, thinking pauses,
+fillers, humans talking to each other, group questions, wrong facts, someone answering first, "stop", "stay quiet",
+"say that again", a late joiner, typed chat, a noisy mic, Higgs's voice leaking back at −30 dB, real (AMI) and TTS
+backchannels and interruptions, quiet ones at −6/−10 dB, other AI names and settings.
+
+| | steps right | reply heard after the line (median, p90) |
+|---|---|---|
+| improved, start of the night (set 1 only) | 29/49 | 1.85 s, 2.44 s |
+| improved, end of the night (`full4`) | **97/98** | **1.54 s, 2.27 s** |
+| default (plain Higgs), same scenes | 59/98 | 1.26 s, 1.42 s |
+
+- Backchannels while Higgs talks: improved kept talking 7/7; default stopped 5/7 and then answered the "mm-hm" as a
+  new turn ~1.2 s later. Whether a backchannel stops default Higgs depends on the sound: clear "Mm-hm.", "Uh-huh.",
+  "Yeah." and 2 real AMI ones stopped it every time; 3 other real AMI ones (soft hums) never did. Through a real
+  Chrome mic path (`tests/browser_bc.py`): default 5/8 (4/8 at −10 dB), improved 0/8 with all 8 answers delivered.
+- Real interruptions (incl. AMI ones at −6 dB): improved stopped every time (~0.44 s).
+- Past Higgs's 5-minute idle timeout (`--set 4`): improved 6/6, default 6/6 (was 2/6: the session never came back).
+- Mode switch mid-call (`--set 5`): answers after both switches, and the history carries over.
+- With the Avatar (`--set 3`): 10/10, reply heard ~4.1 s after the line (a long list of numbers: ~8 s).
+- Real meetings (`tests/ami_meeting.py`, AMI, 4 real voices on 4 bots, nobody talks to the AI): ES2009c 10 min,
+  142 lines, Higgs spoke once (unnecessary; that kind of line is now silent); ES2014c 10 min, 81 lines, never.
+
+Env: `MEET_SAMPLES` (judge samples per line; default 1 in a one-to-one call, 3 with more people), `MEET_BUDGET`
+(Higgs requests per server run, default 30000; the room is told when it runs out), `MEET_PROMPT` (judge, default
+`v5`), `MEET_LINE_SILENCE` (0.30), `MEET_ECHO_DB` (25), `MEET_SPECULATE` (1), `MEET_LANG` (en), `MEET_SPARE_SIGNALS`
+(2 preloaded turn-taking model processes), `MEET_SIGNALS=0` (no per-person turn-taking models: timing falls back to
+silence rules), `MEET_VOICE`.
 
 ## Rooms
 
