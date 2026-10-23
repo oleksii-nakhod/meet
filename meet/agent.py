@@ -164,15 +164,21 @@ def judge_prompt(r, prompt="v4b"):
 def judge_rule(d, r, prompt="v4b"):
     if prompt != "v5" or not isinstance(d, dict):
         return tv_eval.dec_rule(d, r["target_speaker"], 2)
-    if tv_eval.dec_rule(d, r["target_speaker"], 2):  # v4b's rule still holds (asked, a group question it knows, wrong)
-        return True
+    w = d.get("wrong")
+    if w is True or (isinstance(w, (int, float)) and not isinstance(w, bool) and w > 0):
+        return True  # v4b's rule, with "to" read more carefully below
     to = str(d.get("to", "")).lower()
     if to == r["target_speaker"].lower():
         to = "me"
     ctx, cur = r["context_turns"], r["current_turn"]["text"]
+    if (to == "me" and len(r["people"]) > 1 and r["target_speaker"].lower() not in cur.lower()
+            and not any(t["speaker"] == r["target_speaker"] for t in ctx[-2:])):
+        to = "group"  # in a group "you" is nearly always a person (AMI: "makes sense for you to take it from here")
     if (to == "group" and d.get("ask") is True and ctx and ctx[-1]["speaker"] == r["target_speaker"]
             and len(re.findall(r"[A-Za-z']+", cur)) <= 4 and not any(p.lower() in cur.lower() for p in r["people"])):
         to = "me"  # "why?", "how small?", "like what?" right after the AI spoke: a follow-up to it
+    if to == "group":
+        return d.get("ask") is True and d.get("answered") is not True and d.get("can") is True
     if to != "me":
         return False
     if len(r["people"]) == 1 and len(re.findall(r"[A-Za-z']+", cur)) > 3:

@@ -248,7 +248,7 @@ function onAiState(m) {
   const prev = W.ai;
   W.ai = { mode: m.mode ?? prev.mode, avatar: m.avatar ?? prev.avatar, status: m.status ?? prev.status };
   if (m.by && W.ai.mode !== prev.mode) toast(`${m.by} switched ${aiName} to ${MODE_LABEL[W.ai.mode]}`, "mode");
-  if (W.ai.status === "connecting" && prev.status !== "connecting") toast(`Connecting ${aiName} to Higgs…`, "mode");
+  if (W.ai.status === "connecting" && prev.status !== "connecting") toast(`${aiName} is reconnecting…`, "mode");
   if (m.by && W.ai.avatar !== prev.avatar) toast(`${m.by} turned ${aiName}'s avatar ${W.ai.avatar ? "on" : "off"}`, "mode");
   const sw = $("modesw");
   sw.setAttribute("aria-checked", String(W.ai.mode === "improved"));
