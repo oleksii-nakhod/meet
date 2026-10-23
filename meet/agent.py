@@ -531,10 +531,12 @@ class Pool:
             await self.q.put(s)
 
     async def _take(self):
-        """A live pre-opened session, or a freshly opened one if none is ready within a few seconds."""
+        """A live pre-opened session, or a freshly opened one (~0.3-0.6 s) if none is free right now: a line can need
+        more writers at once than the pool holds (draft, correction draft, a hedge, a re-ask), and waiting 3 s for one
+        to come back defeated the hedge."""
         while True:
             try:
-                s = await asyncio.wait_for(self.q.get(), 3.0)
+                s = await asyncio.wait_for(self.q.get(), 0.05)
             except asyncio.TimeoutError:
                 s = self._new()
                 await asyncio.wait_for(s.__aenter__(), 20)
