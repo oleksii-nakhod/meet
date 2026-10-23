@@ -295,9 +295,14 @@ def join_pieces(first, rest):
 
 
 def prefilter(text, ai, history, people=()):
-    """Before judging a transcribed line: (text with a misheard name repaired, kind). kind "skip": nothing to judge
-    ("...", or a hum transcribed in another script: "嗯。"); "backchannel": an acknowledgement nobody needs answered
-    (unless it answers a question the AI just asked: "Want me to go on?" "Yeah."); None: judge it."""
+    """Before judging a transcribed line: (text with a misheard name repaired, kind). None: judge it. Otherwise it is
+    logged but not judged or answered, and doesn't make a reply someone is waiting for stale:
+    "skip"         nothing to judge ("...", or a hum transcribed in another script: "嗯。");
+    "stop"         "Higgs, stop.", "hold on": wants quiet (barge-in has already stopped Higgs);
+    "backchannel"  "mm-hm", "yeah", "got it" (unless it answers the AI's question or offer: "Want me to go on?" "Yeah.");
+    "fragment"     in a group, two words or fewer, no question, no name, no number ("I think.");
+    "filler"       only fillers and function words ("um", "so the, uh, the");
+    "unfinished"   ends on a word no sentence ends on ("what i'm trying to"): it merges with what follows."""
     text = fix_name(text, ai, people)
     if not re.search(r"[A-Za-z]", text):
         return text, "skip"
