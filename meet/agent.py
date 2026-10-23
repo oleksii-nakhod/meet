@@ -15,6 +15,7 @@ import asyncio
 import base64
 import dataclasses
 import os
+import re
 import sys
 import time
 from collections import deque
@@ -25,7 +26,7 @@ from scipy.signal import resample_poly
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "mmhm"))
 sys.path.insert(0, os.path.join(HERE, "..", "third_voice"))
-from mmhm.engine import N, TICK, Engine, Policy, VAD  # noqa: E402
+from mmhm.engine import INCOMPLETE, N, TICK, Engine, Policy, VAD  # noqa: E402
 from mmhm.expressive import SentenceSpeaker  # noqa: E402
 from mmhm.higgs import SR, Session  # noqa: E402
 
@@ -36,6 +37,8 @@ import tv_eval  # noqa: E402
 VOICE = os.environ.get("MEET_VOICE", "chloe")      # the same preset voice in both modes, so the voice doesn't tell
 SAMPLES = int(os.environ.get("MEET_SAMPLES", "3"))  # judge/fact-check samples per line (1 for cheap test runs)
 BUDGET = int(os.environ.get("MEET_BUDGET", "5000"))
+LANG = os.environ.get("MEET_LANG", "en")           # transcription language hint ("" = auto: "mm" came back as "嗯")
+PROMPT = os.environ.get("MEET_PROMPT", "v5")       # judge prompt (see judge_prompt)
 SIGNALS = os.environ.get("MEET_SIGNALS", "1") == "1"  # per-person turn-taking models (about one CPU core each)
 CALLS = {"n": 0}
 # In 1:1 Mm-hm a commit after 0.1 s of silence is a cancellable guess. Here a committed line is transcribed and judged
@@ -100,6 +103,134 @@ def reason(d, speak):
     return "not mine to answer"
 
 
+# v5 (meet, 2026-10-23; tests/judge_cases.py): v4b ignored greetings and its own name ("Hey, Higgs." -> to me, no
+# request -> silent) and, in a one-to-one call, read nearly everything as aimed at "group" ("Anything else?", "Go on.",
+# opinions) -> silent. v5 adds "reply" (would someone in your place be expected to answer now?) and says when the call
+# is one-to-one.
+DEC_SYS5 = tv_eval.DEC_SYS4.replace(
+    '"self" if thinking aloud or stopping mid-sentence.',
+    '"self" if thinking aloud or stopping mid-sentence. Greeting you, saying your name to get your attention, or asking '
+    'whether you are there or can hear counts as "me"; talking about you in the third person ("{ai} is great", '
+    '"{ai} said...") does not.').replace(
+    '"wrong": true if it states',
+    '"reply": true if someone in your place would be expected to respond now: you were greeted, called, asked '
+    'something, asked to go on, explain or repeat, or (in a one-to-one call) told something that invites a reaction; '
+    'false for thanks and acknowledgements ("okay", "got it", "thanks"), backchannels ("mm-hm", "yeah"), fillers, '
+    'unfinished sentences and remarks to someone outside the call.\n"wrong": true if it states').replace(
+    '"can": true, "wrong": false}}', '"can": true, "reply": false, "wrong": false}}')
+assert DEC_SYS5.count('"reply"') == 2 and "counts as" in DEC_SYS5
+ONE_TO_ONE = ("\nThis is a one-to-one call: {people} and you are the only participants, so anything that is not thinking "
+              "aloud or said to someone outside the call is aimed at you (\"me\").")
+TO_1TO1 = ('"to": who {people} is talking to: "me" (you, {ai}: in this call questions, requests, opinions, reactions and '
+           'small talk are aimed at you); "self" if thinking aloud, searching for something, reading out, or stopping '
+           'mid-sentence; "outside" if talking to someone who is not in the call (a person or pet in their room, a phone '
+           'call).')
+
+
+def judge_prompt(r, prompt="v4b"):
+    """(system, user) for the judge: v4b = Third Voice's tv_eval.DEC_SYS4 (scored on its test sets); v5 = DEC_SYS5."""
+    if prompt == "v5":
+        if len(r["people"]) == 1:
+            t = re.sub(r'^"to":.*$', lambda _m: TO_1TO1, DEC_SYS5, count=1, flags=re.M)
+            t = t.replace("\nYou will see", ONE_TO_ONE + "\nYou will see", 1).replace('{{"to": "group"', '{{"to": "me"')
+            return tv_eval.dec_prompt(r, t)
+        return tv_eval.dec_prompt(r, DEC_SYS5)
+    return tv_eval.dec_prompt(r, tv_eval.DEC_SYS4)
+
+
+def judge_rule(d, r, prompt="v4b"):
+    if prompt != "v5" or not isinstance(d, dict):
+        return tv_eval.dec_rule(d, r["target_speaker"], 2)
+    if tv_eval.dec_rule(d, r["target_speaker"], 2):  # v4b's rule still holds (asked, a group question it knows, wrong)
+        return True
+    to = str(d.get("to", "")).lower()
+    if to == r["target_speaker"].lower():
+        to = "me"
+    ctx, cur = r["context_turns"], r["current_turn"]["text"]
+    if (to == "group" and d.get("ask") is True and ctx and ctx[-1]["speaker"] == r["target_speaker"]
+            and len(re.findall(r"[A-Za-z']+", cur)) <= 4 and not any(p.lower() in cur.lower() for p in r["people"])):
+        to = "me"  # "why?", "how small?", "like what?" right after the AI spoke: a follow-up to it
+    if to != "me":
+        return False
+    if len(r["people"]) == 1 and len(re.findall(r"[A-Za-z']+", cur)) > 3:
+        return True  # one-to-one: they're talking to the AI; only short acknowledgements ("okay, thanks") go unanswered
+    return d.get("ask") is True or d.get("reply") is True
+
+
+async def decide(r, ask, samples=SAMPLES, prompt="v4b"):
+    """Should the AI speak after r's current turn? ask(kind, system, user, i) -> Higgs's text, kind "judge"/"check".
+    Majority of the judge votes that came back (a failed request is an abstention, not a "no": under load Higgs fails
+    a few percent of requests with upstream_error), OR all fact-checks that came back say it contradicts a fact.
+    Returns (speak, {"reading": first judge reading (+ wrong), "why": the transcript panel's words})."""
+    (jsys, juser), (fsys, fuser) = judge_prompt(r, prompt), tv_eval.fact_prompt(r)
+    votes = await asyncio.gather(*[ask("judge", jsys, juser, i) for i in range(samples)],
+                                 *[ask("check", fsys, fuser, i) for i in range(samples)])
+    parsed = [p for p in (tv_eval.parse_json(v) for v in votes[:samples]) if isinstance(p, dict)]
+    checks = [p for p in (tv_eval.parse_json(v) for v in votes[samples:]) if isinstance(p, dict)]
+    facts_hit = [bool(p.get("contradicts")) for p in checks]
+    wrong = bool(facts_hit) and all(facts_hit) and len(facts_hit) * 2 > samples
+    speak = (bool(parsed) and sum(judge_rule(p, r, prompt) for p in parsed) * 2 > len(parsed)) or wrong
+    reading = dict(parsed[0] if parsed else {})
+    if wrong:
+        reading["wrong"] = True
+    return speak, {"reading": reading, "why": reason(reading, speak), "votes": len(parsed), "checks":
+                   [p.get("contradicts") for p in checks]}
+
+
+BACKCHANNEL = set("""mm mmm mhm mm-hm mmhm hm hmm uh-huh uh huh uhhuh aha ah oh yeah yes yep yup ok okay right sure
+cool nice wow true exactly totally ha haha lol i see got it gotcha alright all""".split())
+
+
+FILLERS = set("um umm uh uhh er erm hmm hm mm eh ah like well".split())
+# words no English sentence ends on (engine.INCOMPLETE is broader: "go on", "about that" end there; it only delays)
+DANGLING = set("the a an to of and but or because if my your our their than um uh".split())
+
+
+def backchannel(text):
+    """True for a short listener sound or acknowledgement ("Mm-hm.", "Yeah, yeah.", "Okay.", "Got it."), but not for
+    one asked as a question ("Yeah?", "Right?")."""
+    t = text.strip().lower()
+    words = re.findall(r"[a-z][a-z'-]*", t)
+    return bool(words) and len(words) <= 3 and not t.endswith("?") and all(w in BACKCHANNEL for w in words)
+
+
+def fix_name(text, ai):
+    """Higgs STT sometimes mishears the AI's name when it's said to get attention ("Pigs, how should we...",
+    "thanks, Hicks."): a word that sounds like it (similar spelling, about as long), as the first word (after
+    hey/hi/okay/so) or the last one, set off by a comma, becomes the name."""
+    from difflib import SequenceMatcher
+
+    def like(w):
+        w = w.lower()
+        return w != ai.lower() and abs(len(w) - len(ai)) <= 2 and SequenceMatcher(None, w, ai.lower()).ratio() >= 0.6
+
+    m = re.match(r"^((?:hey|hi|hello|okay|ok|so|and|um|uh)[,]?\s+)?([A-Za-z']+)(?=,)", text, re.I)
+    if m and like(m.group(2)):
+        text = text[:m.start(2)] + ai + text[m.end(2):]
+    m = re.search(r",\s*([A-Za-z']+)([.?!]*)\s*$", text)
+    if m and like(m.group(1)):
+        text = text[:m.start(1)] + ai + text[m.end(1):]
+    return text
+
+
+def prefilter(text, ai, history):
+    """Before judging a transcribed line: (text with a misheard name repaired, kind). kind "skip": nothing to judge
+    ("...", or a hum transcribed in another script: "嗯。"); "backchannel": an acknowledgement nobody needs answered
+    (unless it answers a question the AI just asked: "Want me to go on?" "Yeah."); None: judge it."""
+    text = fix_name(text, ai)
+    if not re.search(r"[A-Za-z]", text):
+        return text, "skip"
+    answers_me = bool(history) and history[-1]["speaker"] == ai and history[-1]["text"].rstrip().endswith("?")
+    if backchannel(text) and not answers_me:
+        return text, "backchannel"
+    words = re.findall(r"[a-z][a-z'-]*", text.lower())
+    if all(w in FILLERS or w in INCOMPLETE for w in words) and not text.rstrip().endswith("?"):
+        return text, "filler"      # "um", "so the, uh, the": still thinking
+    if words and words[-1] in DANGLING and not text.rstrip().endswith("?"):
+        return text, "unfinished"  # "so basically what i'm trying to": stopped mid-sentence (they may go on: merge)
+    return text, None
+
+
 def to16(pcm):
     return resample_poly(pcm.astype(np.float32) / 32768, 2, 3).astype(np.float32)
 
@@ -108,35 +239,69 @@ class Pool:
     """Pre-opened Realtime text sessions with fixed instructions, one request each, replaced in the background
     (third_voice/live_demo.py), plus a close() for when the roster (part of the instructions) changes."""
 
+    MAX_AGE = 240.0  # Higgs closes a session after 5 min without user activity (session.idle_timeout)
+
     def __init__(self, instructions, size):
         self.instructions, self.q, self.closed = instructions, asyncio.Queue(), False
         for _ in range(size):
             self._refill()
 
+    def _new(self):
+        return Session({"instructions": self.instructions, "output_modalities": ["text"]})
+
     def _refill(self):
         async def open_one():
-            s = Session({"instructions": self.instructions, "output_modalities": ["text"]})
-            await s.__aenter__()
-            if self.closed:
-                await close(s)
-            else:
-                await self.q.put(s)
+            for k in range(8):  # an open can fail under load (upstream errors, rate limits): keep trying
+                if self.closed:
+                    return
+                s = self._new()
+                try:
+                    await s.__aenter__()
+                except Exception:  # noqa: BLE001
+                    await asyncio.sleep(min(10.0, 1.0 + 2 * k))
+                    continue
+                s.opened_at = time.perf_counter()
+                if self.closed:
+                    await close(s)
+                else:
+                    await self.q.put(s)
+                return
         asyncio.ensure_future(open_one())
 
-    async def ask(self, user):
-        if not spend():
-            return ""
-        s = await self.q.get()
-        self._refill()
-        try:
-            since = s.now()
-            await s.say_text(user)
-            _, ev = await s.wait("response.done", timeout=45, since=since)
-            return s.transcript(ev["response"]["id"]).strip()
-        except Exception:  # noqa: BLE001  (a failed vote counts as "don't speak": the safe side)
-            return ""
-        finally:
-            asyncio.ensure_future(close(s))
+    async def _take(self):
+        """A live pre-opened session, or a freshly opened one if none is ready within a few seconds."""
+        while True:
+            try:
+                s = await asyncio.wait_for(self.q.get(), 3.0)
+            except asyncio.TimeoutError:
+                s = self._new()
+                await asyncio.wait_for(s.__aenter__(), 20)
+                return s
+            self._refill()
+            if s.close_code is None and time.perf_counter() - s.opened_at < self.MAX_AGE:
+                return s
+            asyncio.ensure_future(close(s))  # idle-closed or about to be: take the next one
+
+    async def ask(self, user, retries=0):
+        """Higgs's text answer to `user`, "" if it failed (`retries` more attempts on a failure or empty answer)."""
+        for _ in range(retries + 1):
+            if not spend():
+                return ""
+            s = None
+            try:
+                s = await self._take()
+                since = s.now()
+                await s.say_text(user)
+                _, ev = await s.wait("response.done", timeout=30, since=since)
+                text = s.transcript(ev["response"]["id"]).strip()
+                if text:
+                    return text
+            except Exception:  # noqa: BLE001  (a failed vote is an abstention, see decide())
+                pass
+            finally:
+                if s is not None:
+                    asyncio.ensure_future(close(s))
+        return ""
 
     async def close(self):
         self.closed = True
@@ -160,6 +325,9 @@ class DefaultBrain:
 
     async def stop(self):
         await close(self.engine.session)
+
+    def dead(self):
+        return self.engine.session.close_code is not None
 
     async def tick(self, frames):
         mix = np.zeros(N, np.int32)
@@ -196,27 +364,77 @@ class Listener:
         self.preroll, self.streaming, self.sent = deque(maxlen=10), False, 0
         self.merge = False       # they resumed right after a commit: join the next piece to the last line
         self.signals = None
-        self.session = Session({"instructions": "Transcription only.", "output_modalities": ["text"],
-                                "audio": {"input": {"turn_detection": None, "transcription": {"model": "higgs-stt-3.1"}}}})
-        self.open = False
+        self.session, self.open, self.stopped = None, False, False
+        self.backlog = []        # audio to send once a (re)opened transcription session is up
+        self.commit_waiting = None  # a line ended while the session was down: commit it after the backlog
+        self.opener = None
+
+    def _new_session(self):
+        tr = {"model": "higgs-stt-3.1", **({"language": LANG} if LANG else {})}
+        return Session({"instructions": "Transcription only.", "output_modalities": ["text"],
+                        "audio": {"input": {"turn_detection": None, "transcription": tr}}})
 
     async def start(self):
-        await self.session.__aenter__()
-        self.open = True
+        self._reopen()
         if SIGNALS:
             from mmhm.models import ProcSignals
             self.signals = ProcSignals(vap=True, bcdet=True, bc=False, wait=False)
 
+    def _reopen(self):
+        """(Re)open the transcription session in the background, retrying: an open can fail under load, and Higgs
+        closes a session after 5 minutes without speech from this person (session.idle_timeout)."""
+        if self.opener and not self.opener.done():
+            return
+        self.open = False
+
+        async def go():
+            k = 0
+            while not self.stopped:
+                s = self._new_session()
+                try:
+                    await s.__aenter__()
+                except Exception:  # noqa: BLE001
+                    k += 1
+                    await asyncio.sleep(min(10.0, 1.0 + 2 * k))
+                    continue
+                if self.stopped:
+                    await close(s)
+                    return
+                old, self.session = self.session, s
+                if old is not None:
+                    asyncio.ensure_future(close(old))
+                backlog, self.backlog = self.backlog, []
+                for f in backlog:
+                    await s.send({"type": "input_audio_buffer.append", "audio": base64.b64encode(f.tobytes()).decode()})
+                self.open = True
+                if self.commit_waiting is not None:
+                    t_end, self.commit_waiting = self.commit_waiting, None
+                    asyncio.ensure_future(self._transcribe(t_end))
+                return
+        self.opener = asyncio.ensure_future(go())
+
     async def stop(self):
+        self.stopped = True
+        if self.opener:
+            self.opener.cancel()
         if self.signals:
             self.signals.close()
-        if self.open:
-            self.open = False
+        self.open = False
+        if self.session is not None:
             await close(self.session)
 
     async def _append(self, pcm):
-        await self.session.send({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm.tobytes()).decode()})
         self.sent += 1
+        if self.open and self.session.close_code is None:
+            try:
+                await self.session.send({"type": "input_audio_buffer.append",
+                                         "audio": base64.b64encode(pcm.tobytes()).decode()})
+                return
+            except Exception:  # noqa: BLE001  (closed under us: reopen below)
+                pass
+        if len(self.backlog) < 1500:  # up to 30 s of speech waits for the new session
+            self.backlog.append(pcm)
+        self._reopen()
 
     async def tick(self, t, pcm, others):
         self.speaking, _ = self.vad(pcm)
@@ -224,8 +442,8 @@ class Listener:
             u16 = to16(pcm) * (1.0 if self.speaking else 0.05)  # noise gate, as in engine.tick
             sig = self.signals.push(u16, to16(others))
             self.p_now, self.p_bc = sig.get("p_now"), sig.get("p_bcdet")
-        if not self.open:
-            return
+        if self.open and self.session.close_code is not None:
+            self._reopen()  # idle timeout / max duration / network: what they say next waits in the backlog
         if self.speaking and not self.streaming:  # only speech (plus 200 ms before it) goes to transcription
             self.streaming = True
             for f in self.preroll:
@@ -238,7 +456,10 @@ class Listener:
         for act in self.gate.update(t, self.speaking, self.p_now):
             if act == "commit" and self.sent >= int(self.p.min_turn / TICK):
                 self.streaming, self.sent = False, 0
-                asyncio.ensure_future(self._transcribe(time.perf_counter()))
+                if self.open:
+                    asyncio.ensure_future(self._transcribe(time.perf_counter()))
+                else:
+                    self.commit_waiting = time.perf_counter()
             elif act == "resume":
                 self.merge = True
                 self.b.on_resume(self)
@@ -246,14 +467,16 @@ class Listener:
     async def _transcribe(self, t_end):
         if not spend():
             return
-        since = self.session.now()
-        await self.session.send({"type": "input_audio_buffer.commit"})
+        s = self.session
+        since = s.now()
         try:
-            _, ev = await self.session.wait("input_audio_buffer.committed", timeout=10, since=since)
+            await s.send({"type": "input_audio_buffer.commit"})
+            _, ev = await s.wait("input_audio_buffer.committed", timeout=10, since=since)
             item = ev.get("item_id")
-            _, ev = await self.session.wait(lambda e: e.get("type") == "conversation.item.input_audio_transcription.completed"
-                                            and e.get("item_id") == item, timeout=30, since=since)
-        except asyncio.TimeoutError:
+            _, ev = await s.wait(lambda e: e.get("type") == "conversation.item.input_audio_transcription.completed"
+                                 and e.get("item_id") == item, timeout=30, since=since)
+        except Exception as e:  # noqa: BLE001
+            await self.b.a.room.event({"type": "ai_error", "error": f"transcription ({self.name}): {e!r}"[:200]})
             return
         text = (ev.get("transcript") or "").strip()
         if text:
@@ -299,17 +522,20 @@ class ImprovedBrain:
 
     async def _rebuild_pools(self):
         old, p = self.pools, self.point()
-        self.pools = {"judge": Pool(tv_eval.dec_prompt(p, tv_eval.DEC_SYS4)[0], SAMPLES),
+        self.pools = {"judge": Pool(judge_prompt(p, PROMPT)[0], SAMPLES),
                       "check": Pool(tv_eval.fact_prompt(p)[0], SAMPLES),
                       "write": Pool(REPLY_SYS.format(ai=p["target_speaker"], setting=p["setting"],
                                                      people=", ".join(p["people"]) or "the group",
-                                                     facts=" ".join(p["facts"])), 1)}
+                                                     facts=" ".join(p["facts"])), 2)}
         if old:
             for pool in old.values():
                 await pool.close()
 
     async def start(self):
         await self.on_roster(self.a.room.people())
+
+    def dead(self):
+        return False  # each listener and pool reconnects on its own
 
     async def stop(self):
         for li in list(self.listeners.values()):
@@ -344,43 +570,49 @@ class ImprovedBrain:
 
     async def on_line(self, li, text, t_end, merge):
         a = self.a
+        text, kind = prefilter(text, a.ai, a.history)
+        if kind == "skip":
+            return
         if any(time.time() - t0 < 2.0 and slot != li.slot and repeats(text, [x]) for t0, slot, x in self.recent):
             return  # someone's mic picked up another participant (no headphones): ignore the echo
         self.recent.append((time.time(), li.slot, text))
         if merge and a.history and a.history[-1]["speaker"] == li.name:
             text = a.history.pop()["text"] + " " + text
-        self.line_no += 1
-        line_id = self.line_no
-        self.last_listener = li
         context = list(a.history)
         cur = {"speaker": li.name, "text": text}
         a.history.append(cur)
+        if kind == "backchannel":  # "mm-hm", "yeah", "okay": part of the meeting, but nothing to answer, and it doesn't
+            li.gate.settle()   # make a reply someone else is waiting for stale
+            await a.line(li.slot, li.name, text, {"speak": False, "why": "backchannel", "decided_s": 0.0})
+            return
+        self.line_no += 1
+        line_id = self.line_no
+        self.last_listener = li
         r = {**self.point(), "meeting": a.room.id, "line": line_id, "context_turns": context, "current_turn": cur}
         if len(a.facts) > 12:  # big fact sheet: the 8 most relevant facts per line (third_voice/retrieve.py)
             import retrieve
             r["facts"] = retrieve.top_facts(r, 8)
         pools = self.pools
         ctx = "\n".join(f"{t['speaker']}: {t['text']}" for t in context[-14:])
-        draft = asyncio.ensure_future(pools["write"].ask(f"Conversation so far:\n{ctx}\n{li.name}: {text}\n\nYour reply:"))
-        user, fuser = tv_eval.dec_prompt(r, tv_eval.DEC_SYS4)[1], tv_eval.fact_prompt(r)[1]
-        votes = await asyncio.gather(*[pools["judge"].ask(user) for _ in range(SAMPLES)],
-                                     *[pools["check"].ask(fuser) for _ in range(SAMPLES)])
-        parsed = [tv_eval.parse_json(v) for v in votes[:SAMPLES]]
-        facts_hit = [bool((tv_eval.parse_json(v) or {}).get("contradicts")) for v in votes[SAMPLES:]]
-        speak = sum(tv_eval.dec_rule(p, a.ai, 2) for p in parsed) * 2 > SAMPLES or (bool(facts_hit) and all(facts_hit))
-        why = dict(parsed[0] or {})
-        if facts_hit and all(facts_hit):
-            why["wrong"] = True
-        await a.line(li.slot, li.name, text, {"speak": speak, "why": reason(why, speak), "reading": why,
+        convo = f"Conversation so far:\n{ctx}\n{li.name}: {text}\n\nYour reply:"
+        # both drafts start with the decision, so a correction costs no extra wait (rewriting it after: ~1 s)
+        draft = asyncio.ensure_future(pools["write"].ask(convo, retries=1))
+        cdraft = asyncio.ensure_future(pools["write"].ask(CORRECT.format(ai=a.ai) + convo, retries=1)) if a.facts else None
+        speak, d = await decide(r, lambda kind, _sys, user, _i: pools[kind].ask(user), prompt=PROMPT)
+        why = d["reading"]
+        await a.line(li.slot, li.name, text, {"speak": speak, "why": d["why"], "reading": why, "votes": d["votes"],
+                                              "checks": d["checks"],
                                               "decided_s": round(time.perf_counter() - t_end, 2)})
         if not speak:
             li.gate.settle()
-            draft.add_done_callback(lambda f: f.exception())
+            for f in (draft, cdraft):
+                if f:
+                    f.add_done_callback(lambda f: f.exception())
             return
-        if why.get("wrong"):  # the draft was written without knowing why Higgs speaks: say the correction
-            draft.add_done_callback(lambda f: f.exception())
-            draft = asyncio.ensure_future(pools["write"].ask(CORRECT.format(ai=a.ai) + f"Conversation so far:\n{ctx}\n"
-                                                             f"{li.name}: {text}\n\nYour reply:"))
+        if why.get("wrong") and cdraft:  # the plain draft was written without knowing why Higgs speaks
+            draft, cdraft = cdraft, draft
+        if cdraft:
+            cdraft.add_done_callback(lambda f: f.exception())
         ans = (await draft).strip().strip('"')
         if not ans or repeats(ans, [h["text"] for h in a.history if h["speaker"] == a.ai][-3:]):
             return
@@ -533,6 +765,9 @@ class HiggsAgent:
         self.task = None
         self.running = False
         self.switching = None
+        self.starting = None
+        self.gen = 0             # bumped by every launch / switch / stop
+        self.errors_t = 0.0      # last ai_error event from a failing tick (rate-limited)
         self.avatar = bool(getattr(room, "avatar", False))
 
     def names(self):
@@ -550,27 +785,54 @@ class HiggsAgent:
         await self.room.event({"type": "line", "slot": slot, "name": name, "text": text, "decision": decision,
                                "mode": self.mode})
 
-    def _brain(self):
-        return ImprovedBrain(self) if self.mode == "improved" else DefaultBrain(self)
+    def _brain(self, mode):
+        return ImprovedBrain(self) if mode == "improved" else DefaultBrain(self)
+
+    def _launch(self):
+        """Start a brain for the current mode in the background, retrying until Higgs answers (opens fail under load:
+        voice validation is rate-limited per key, upstream errors). A newer launch (mode switch) or stop() supersedes
+        it: a superseded brain is stopped, never installed."""
+        self.gen += 1
+        gen, mode = self.gen, self.mode
+
+        async def go():
+            k = 0
+            while self.running and gen == self.gen:
+                b = self._brain(mode)
+                try:
+                    await b.start()
+                except Exception as e:  # noqa: BLE001  (Higgs unreachable: the humans can still talk to each other)
+                    k += 1
+                    try:
+                        await b.stop()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if k == 1 or k % 5 == 0:
+                        await self.room.event({"type": "ai_error", "error": f"start ({mode}, try {k}): {e!r}"[:300]})
+                    await self.status("connecting")
+                    await asyncio.sleep(min(10.0, 2.0 * k))
+                    continue
+                if gen != self.gen or not self.running:
+                    await b.stop()
+                    return
+                self.brain = b
+                await self.status("listening")
+                return
+        self.starting = asyncio.ensure_future(go())
 
     async def start(self):
-        self.brain = self._brain()
-        try:
-            await self.brain.start()
-        except Exception as e:  # noqa: BLE001  (Higgs unreachable: the humans can still talk to each other)
-            await self.room.event({"type": "ai_error", "error": f"start: {e!r}"[:300]})
-            self.brain = None
         self.running = True
         self.task = asyncio.ensure_future(self._run())
-        await self.status("listening")
+        self._launch()
 
     async def stop(self):
         self.running = False
+        self.gen += 1
         if self.task:
             self.task.cancel()
         if self.brain:
-            await self.brain.stop()
-            self.brain = None
+            b, self.brain = self.brain, None
+            await b.stop()
 
     def feed(self, slot, pcm):
         q = self.inq.setdefault(slot, deque(maxlen=25))
@@ -600,19 +862,14 @@ class HiggsAgent:
 
     async def _switch(self):
         await self.status("switching")
+        self.gen += 1  # a brain still starting for the old mode must not be installed
         old, self.brain = self.brain, None
         if old:
             await old.stop()
         await self.room.ai_flush()
         await self.room.ai_gain(1.0)
         if self.running:
-            b = self._brain()
-            try:
-                await b.start()
-                self.brain = b
-            except Exception as e:  # noqa: BLE001
-                await self.room.event({"type": "ai_error", "error": f"switch: {e!r}"[:300]})
-        await self.status("listening")
+            self._launch()
 
     def set_avatar(self, on):
         """Improved mode only: plain Realtime audio arrives in bursts and has no reply boundary to render on."""
@@ -636,11 +893,19 @@ class HiggsAgent:
             k += 1
             frames = {slot: self._pop(slot) for slot in list(self.inq)}
             brain = self.brain
+            if brain is not None and brain.dead():  # its Realtime session closed (idle timeout, max duration, network)
+                await self.room.event({"type": "ai_error", "error": "Higgs session closed; reconnecting"})
+                self.brain = None
+                asyncio.ensure_future(brain.stop())
+                self._launch()
+                brain = None
             if brain is not None:
                 try:
                     out = await brain.tick(frames)
                 except Exception as e:  # noqa: BLE001  (keep the room alive; the log says what broke)
-                    await self.room.event({"type": "ai_error", "error": repr(e)[:300]})
+                    if time.perf_counter() - self.errors_t > 5.0:
+                        self.errors_t = time.perf_counter()
+                        await self.room.event({"type": "ai_error", "error": repr(e)[:300]})
                     out = None
                 if out is not None:
                     await self.room.send_ai_audio(out.astype(np.int16).tobytes())
