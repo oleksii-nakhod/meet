@@ -12,7 +12,9 @@ The agent (agent.HiggsAgent, or stub_agent.HiggsAgent when that is missing) gets
 import asyncio
 import json
 import os
+import queue
 import secrets
+import threading
 import time
 from collections import deque
 
@@ -100,6 +102,35 @@ class Out:
                 pass
 
 
+class _Logger:
+    """One background thread appending queued lines to their files (kept open)."""
+
+    def __init__(self):
+        self.q, self.files = queue.SimpleQueue(), {}
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def put(self, path, line):
+        self.q.put((path, line))
+
+    def _run(self):
+        while True:
+            path, line = self.q.get()
+            try:
+                f = self.files.get(path)
+                if f is None:
+                    if len(self.files) > 64:  # rooms come and go
+                        for old in list(self.files.values()):
+                            old.close()
+                        self.files.clear()
+                    f = self.files[path] = open(path, "a", buffering=1)
+                f.write(line)
+            except OSError:
+                pass
+
+
+LOGGER = _Logger()
+
+
 class Human:
     def __init__(self, pid, name, slot, ws):
         self.pid, self.name, self.slot = pid, name, slot
@@ -171,11 +202,9 @@ class Room:
         return {"type": "ai_state", "mode": self.mode, "avatar": self.avatar, "status": self.status}
 
     def log(self, d):
-        try:
-            with open(self.log_path, "a") as f:
-                f.write(json.dumps({"t": round(time.time(), 3), **d}) + "\n")
-        except OSError:
-            pass
+        """Queue a line for the room log. Written by a background thread: out/ is on NFS here, where an append took
+        2-12 ms and sometimes far more, on the event loop that clocks everyone's audio (a 339 ms tick)."""
+        LOGGER.put(self.log_path, json.dumps({"t": round(time.time(), 3), **d}) + "\n")
 
     def _all(self, d):
         s = json.dumps(d)
