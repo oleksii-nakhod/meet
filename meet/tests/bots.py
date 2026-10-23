@@ -93,7 +93,9 @@ class Bot:
         return time.perf_counter() - self.t0
 
     async def join(self):
-        u = self.base.replace("http", "ws") + f"/ws/room?room={self.room}&pid={self.pid}&name={self.name}&k={self.k}"
+        from urllib.parse import urlencode
+        u = self.base.replace("http", "ws") + "/ws/room?" + urlencode({"room": self.room, "pid": self.pid, "name": self.name,
+                                                                        "k": self.k})
         self.ws = await websockets.connect(u, max_size=None)
         self.tasks = [asyncio.ensure_future(self._send()), asyncio.ensure_future(self._recv())]
 
