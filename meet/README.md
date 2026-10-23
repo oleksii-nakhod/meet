@@ -79,7 +79,7 @@ backchannels and interruptions, quiet ones at −6/−10 dB, other AI names and 
 | | steps right | reply heard after the line (median, p90) |
 |---|---|---|
 | improved, start of the night (set 1 only) | 29/49 | 1.85 s, 2.44 s |
-| improved, end of the night (`final_all`, sets 1+2 incl. quiet mics) | **99/100** | **1.57 s, 2.53 s** |
+| improved, end of the night (`final3`, sets 1+2 incl. quiet mics) | **101/102** | **1.46 s, 2.01 s** |
 | default (plain Higgs), same scenes | 64/104 | 1.26 s, 1.42 s |
 
 Also at the end of the night: mode switching 6/6, accents (voice-library Indian English / Canadian voices) 9/9,
@@ -93,7 +93,9 @@ bystander's voice): cues answered 10/18 → 21/24 and 22/24 in two final runs, p
   "Yeah." and 2 real AMI ones stopped it every time; 3 other real AMI ones (soft hums) never did. Through a real
   Chrome mic path (`tests/browser_bc.py`): default 5/8 and 7/8 (4/8 at −10 dB), improved 0/8 with all 8 answers
   delivered.
-- Real interruptions (incl. AMI ones at −6 dB): improved stopped every time (~0.44 s).
+- Real interruptions: improved stopped every time at normal level (~0.5–0.9 s); quiet real AMI ones at −6 dB (about
+  −31 dBFS, as from a mic without auto gain) stop it most of the time (one miss in the last run): the echo gate treats
+  sound 25 dB below what Higgs plays as its own voice coming back.
 - Past Higgs's 5-minute idle timeout (`--set 4`): improved 6/6, default 6/6 (was 2/6: the session never came back).
 - Mode switch mid-call (`--set 5`): answers after both switches, and the history carries over.
 - With the Avatar (`--set 3`): 8/8; the face says "Hmm." ~1.5 s after the line, the answer starts ~4.0 s after it
