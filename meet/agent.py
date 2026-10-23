@@ -17,6 +17,7 @@ import dataclasses
 import os
 import re
 import sys
+import threading
 import time
 from collections import deque
 
@@ -59,6 +60,7 @@ LINE_POLICY = dataclasses.replace(Policy(), min_silence=float(os.environ.get("ME
 FLOOR_POLICY = dataclasses.replace(Policy(), min_silence=0.35)  # room quiet before Higgs may start (0.1 s let it
 #                                                                 start in the gap between an interrupter's words)
 STALE_S = 3.5  # a reply that couldn't start this long after its line, while people kept talking, is about a moment
+STALE_ADDRESSED = 6.0  # an answer to a question put to the AI by name waits longer for a gap
 STALE_MAX = 8.0  # that has passed; in a quiet room it may come later (a slow Higgs request), but not after this
 CORRECT = ("[The latest utterance contradicts what you know. Start by correcting it plainly, as {ai}, not as one of "
            "the people.]\n")
@@ -225,6 +227,10 @@ BACKCHANNEL = set("""mm mmm mhm mm-hm mmhm hm hmm uh-huh uh huh uhhuh aha ah oh 
 cool nice wow true exactly totally ha haha lol i see got it gotcha alright all""".split())
 
 
+# a short line with one of these may still state a (wrong) fact: "Sunday.", "Five minutes."
+FACTY = re.compile(r"\d|\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|tonight|noon|midnight|"
+                   r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|"
+                   r"hundred|thousand|million|percent|minutes?|hours?|days?|weeks?|euros?|dollars?|pounds?)\b", re.I)
 OFFER = re.compile(r"\b(let me know|want me to|shall I|should I|would you like|do you want|if you(?:'d)? like)\b", re.I)
 FILLERS = set("um umm uh uhh er erm hmm hm mm eh ah like well".split())
 # words no English sentence ends on (engine.INCOMPLETE is broader: "go on", "about that" end there; it only delays)
@@ -289,6 +295,9 @@ def prefilter(text, ai, history, people=()):
     if backchannel(text) and not answers_me:
         return text, "backchannel"
     words = re.findall(r"[a-z][a-z'-]*", text.lower())
+    if (len(people) > 1 and len(words) <= 2 and not text.rstrip().endswith("?") and ai.lower() not in text.lower()
+            and not last and not FACTY.search(text)):  # right after the AI spoke, "why" is a follow-up
+        return text, "fragment"   # "I think.", "So, um.": in a group, a scrap, not a line to judge or to drop replies for
     if all(w in FILLERS or w in INCOMPLETE for w in words) and not text.rstrip().endswith("?"):
         return text, "filler"      # "um", "so the, uh, the": still thinking
     if words and words[-1] in DANGLING and not text.rstrip().endswith("?"):
@@ -362,30 +371,45 @@ def frame_db(pcm):
 class Spares:
     """Turn-taking model processes loaded ahead of time. Loading one takes seconds (longer on a busy machine), and
     until it's ready a person's lines end on the 0.8 s fallback instead of 0.3 s: in a loaded test run, 29 of 48 lines.
-    New listeners (a join, a mode switch) take a ready one; a replacement starts loading at once."""
+    New listeners (a join, a mode switch) take a ready one; a replacement starts loading at once. Processes are
+    started off the event loop: starting one blocks for a while, and a 3-person room starting 6 held up every room's
+    20 ms clock by seconds (dropped audio, shredded transcripts)."""
 
     def __init__(self, n):
-        self.n, self.ready = n, deque()
+        self.n, self.ready, self.filling = n, deque(), False
 
-    def _spawn(self):
+    @staticmethod
+    def _spawn():
         from mmhm.models import ProcSignals
         return ProcSignals(vap=True, bcdet=True, bc=False, wait=False)
 
     def fill(self):
-        while len(self.ready) < self.n:
-            self.ready.append(self._spawn())
+        """Top up the spares in a background thread (no-op if already doing so)."""
+        if self.filling or len(self.ready) >= self.n:
+            return
+        self.filling = True
 
-    def take(self):
-        s = next((x for x in self.ready if x.ready.is_set()), None) or (self.ready[0] if self.ready else None)
+        def work():
+            try:
+                while len(self.ready) < self.n:
+                    self.ready.append(self._spawn())
+            finally:
+                self.filling = False
+        threading.Thread(target=work, daemon=True).start()
+
+    async def take(self):
+        s = next((x for x in list(self.ready) if x.ready.is_set()), None) or (self.ready[0] if self.ready else None)
         if s is not None:
             self.ready.remove(s)
         else:
-            s = self._spawn()
+            s = await asyncio.to_thread(self._spawn)
         self.fill()
         return s
 
 
 SPARES = Spares(int(os.environ.get("MEET_SPARE_SIGNALS", "2")))
+if SIGNALS:  # import torch + MaAI now, at server start: done during the first call it stalled every room for ~5 s
+    import mmhm.models  # noqa: E402,F401
 
 
 def to16(pcm):
@@ -580,7 +604,7 @@ class Listener:
     async def start(self):
         self._reopen()
         if SIGNALS:
-            self.signals = SPARES.take()
+            self.signals = await SPARES.take()
 
     def _reopen(self):
         """(Re)open the transcription session in the background, retrying: an open can fail under load, and Higgs
@@ -720,6 +744,7 @@ class Reply:
         self.one = one           # only the first sentence (Avatar on: its render waits for the whole speech)
         self.label, self.head = (f"{ai}:" if ai else None), ""  # the writer sometimes starts with "Higgs:"
         self.vocative = False    # its line only called the AI ("Hey, Higgs."): the request may follow a pause
+        self.addressed = False   # its line named the AI (or a one-to-one call): owed an answer despite side chatter
         self.audio, self.done, self.pos, self.hist_idx = bytearray(), False, 0, None
         self.video = True        # False while its Avatar render hasn't sent the first chunk (audio waits for it)
         self.render = None       # Avatar render task, started as soon as the speech is done (before the floor opens)
@@ -784,6 +809,7 @@ class ImprovedBrain:
         self.recent = deque(maxlen=12)  # (time, slot, text): echo guard
         self.lab_t = 0.0
         self.voice_at = 0.0       # perf_counter when anyone last made a sound
+        self.line_by = {}         # line id -> slot of who said it
         self.out_db = deque([-90.0], maxlen=30)  # Higgs's output level over the last 0.6 s (echo gate)
 
     def point(self):
@@ -842,6 +868,16 @@ class ImprovedBrain:
         if self.pending and self.pending.listener is li:
             self._cancel_pending()
 
+    def moved_on(self, r):
+        """Has the conversation moved past r's line? Any newer line does, except that a question put to the AI by name
+        (or in a one-to-one call) is still owed an answer while other people chat: only the asker going on, or a newer
+        reply, replaces it (in a busy AMI meeting every answer to a direct question was dropped otherwise)."""
+        if r.line_id == self.line_no:
+            return False
+        if not r.addressed:
+            return True
+        return any(self.line_by.get(i) == r.listener.slot for i in range(r.line_id + 1, self.line_no + 1))
+
     def _cancel_pending(self):
         if self.pending:
             self.pending.cancel = True  # also stops its Avatar render (one at a time per API key)
@@ -871,6 +907,7 @@ class ImprovedBrain:
             return
         self.line_no += 1
         line_id = self.line_no
+        self.line_by[line_id] = li.slot
         self.last_listener = li
         r = {**self.point(), "meeting": a.room.id, "line": line_id, "context_turns": context, "current_turn": cur}
         if len(a.facts) > 12:  # big fact sheet: the 8 most relevant facts per line (third_voice/retrieve.py)
@@ -879,6 +916,7 @@ class ImprovedBrain:
         pools = self.pools
         ctx = "\n".join(f"{t['speaker']}: {t['text']}" for t in context[-14:])
         convo = f"Conversation so far:\n{ctx}\n{li.name}: {text}\n\nYour reply:"
+        addressed = len(self.listeners) == 1 or re.search(rf"\b{re.escape(a.ai)}\b", text, re.I) is not None
         if a.avatar:  # the face renders only once the whole reply is spoken, and TTS takes about as long as the speech
             convo = "[Answer in one short sentence of at most 12 words.]\n" + convo
         # Likely a reply (a one-to-one call, the AI's name, a question): voice the draft while it streams in and the
@@ -943,7 +981,8 @@ class ImprovedBrain:
                                             "briefly.]\n" + convo, retries=1)).strip().strip('"')
             t_draft = time.perf_counter()
         skip = ("no draft (Higgs request failed)" if not ans else "repeat" if repeats(ans, mine)
-                else "someone spoke since" if line_id != self.line_no else None)
+                else "someone spoke since" if line_id != self.line_no and not (addressed and not any(
+                    self.line_by.get(i) == li.slot for i in range(line_id + 1, self.line_no + 1))) else None)
         if skip:  # the next line's decision sees this one in context
             if spec:
                 spec.speaker.cancel()
@@ -956,6 +995,7 @@ class ImprovedBrain:
         else:
             self.pending = Reply(line_id, li, text, ans, t_end)
         self.pending.vocative = vocative_only(text, a.ai)
+        self.pending.addressed = addressed
         if a.avatar:  # render ahead, into a buffer: by the time the floor opens the face is (nearly) ready
             self.pending.video = False
             self.pending.render = asyncio.ensure_future(self._render(self.pending))
@@ -988,7 +1028,7 @@ class ImprovedBrain:
         if self.playing is None and r is not None and r.closed and len(r.audio) >= N * 2:
             li = r.listener
             act, why = self.take.may_play(t, {"p_now": li.p_now, "silence": li.gate.silence}, anyone, r.line_text,
-                                          r.line_id != self.line_no)
+                                          self.moved_on(r))
             holder = next((x for x in self.listeners.values() if x is not li and x.gate.silence < FLOOR_POLICY.max_wait
                            and (x.p_now is None or x.p_now >= FLOOR_POLICY.th_play)), None)
             if act == "play" and holder is not None:
@@ -997,12 +1037,13 @@ class ImprovedBrain:
             # three"): wait for that verdict; a substantive line then makes this reply stale, a "mm-hm" doesn't
             other = next((x for x in self.listeners.values() if x is not li and (x.in_flight or
                           (x.gate.speech >= LINE_POLICY.min_turn and x.last_voice > r.t_end))), None)
-            if act == "play" and other is not None:
+            if act == "play" and other is not None and not r.addressed:
                 act, why = "wait", f"{other.name}'s line"
             if act == "play" and r.vocative and li.gate.silence < VOCATIVE_WAIT:
                 act, why = "wait", "the request may follow"  # "Hey Higgs, [pause] quick one: ..."
             age = time.perf_counter() - r.t_end
-            if act != "drop" and ((age > STALE_S and self.voice_at > r.t_end) or age > STALE_MAX):
+            stale = STALE_ADDRESSED if r.addressed else STALE_S
+            if act != "drop" and ((age > stale and self.voice_at > r.t_end) or age > STALE_MAX):
                 act, why = "drop", "stale"  # people moved on (or it's very late); a slow reply to a quiet room still plays
             if act == "play":
                 self.pending, self.playing = None, r
@@ -1027,7 +1068,7 @@ class ImprovedBrain:
             r.video = True  # the avatar was switched off while this reply waited for its face: just speak
         if r is not None and not r.video:
             taker = next((li for li in self.listeners.values() if li.run >= FLOOR_POLICY.interrupt_max), None)
-            if taker or r.line_id != self.line_no:  # someone took the floor while the face rendered (a "mm" doesn't)
+            if taker or self.moved_on(r):  # someone took the floor while the face rendered (a "mm" doesn't)
                 r.cancel = True
                 r.speaker.cancel()
                 if r.hist_idx == len(self.a.history) - 1:  # never heard: not part of the meeting
@@ -1163,6 +1204,7 @@ class HiggsAgent:
         self.gen = 0             # bumped by every launch / switch / stop
         self.errors_t = 0.0      # last ai_error event from a failing tick (rate-limited)
         self.told_budget = False
+        self.stats = {"dropped": 0, "late_max": 0.0, "catchup": 0}  # input frames lost, worst lateness, catch-up ticks
         self.avatar = bool(getattr(room, "avatar", False))
 
     def names(self):
@@ -1221,6 +1263,7 @@ class HiggsAgent:
         self._launch()
 
     async def stop(self):
+        await self.room.event({"type": "loop_stats", **self.stats})
         self.running = False
         self.gen += 1
         if self.task:
@@ -1230,7 +1273,12 @@ class HiggsAgent:
             await b.stop()
 
     def feed(self, slot, pcm):
-        q = self.inq.setdefault(slot, deque(maxlen=25))
+        # Up to 1 s of a person's audio waits for the tick loop. (It used to keep only 120 ms: with three rooms on one
+        # server the loop sometimes ran late, the dropped speech reached STT in shreds, "Higgs, what do you think..."
+        # -> "Pig.", and Higgs didn't answer.) A late loop catches up by running ticks back to back (_run).
+        q = self.inq.setdefault(slot, deque(maxlen=50))
+        if len(q) == q.maxlen:
+            self.stats["dropped"] += 1
         q.append(np.frombuffer(pcm, np.int16))
 
     def on_roster(self, people):
@@ -1278,8 +1326,6 @@ class HiggsAgent:
         q = self.inq.get(slot)
         if not q:
             return np.zeros(N, np.int16)
-        while len(q) > 6:  # a burst after network jitter: stay near real time
-            q.popleft()
         return q.popleft()
 
     async def _run(self):
@@ -1309,6 +1355,11 @@ class HiggsAgent:
                 if out is not None:
                     await self.room.send_ai_audio(out.astype(np.int16).tobytes())
             delay = t0 + k * TICK - time.perf_counter()
+            self.stats["late_max"] = max(self.stats["late_max"], round(-delay, 3))
+            if max((len(q) for q in self.inq.values()), default=0) > 2:
+                self.stats["catchup"] += 1
+                await asyncio.sleep(0)  # audio is waiting: next tick now (let the sockets run in between)
+                continue
             if delay > 0:
                 await asyncio.sleep(delay)
             elif delay < -0.5:  # fell far behind (a slow tick): resync instead of racing to catch up
