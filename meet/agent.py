@@ -411,9 +411,15 @@ def vocative_person(text, people, ai):
 
 
 def vocative_only(text, ai):
-    """"Hey, Higgs." / "Higgs?" / "Hi Higgs!": the AI's name with at most a greeting word."""
-    rest = [w for w in re.findall(r"[a-z']+", text.lower()) if w != ai.lower()]
-    return ai.lower() in text.lower() and all(w in ("hey", "hi", "hello", "ok", "okay", "um", "so", "oh", "yo") for w in rest)
+    """"Hey, Higgs." / "Higgs?" / "Hi Higgs!": the AI's name with at most a greeting word. Also a short preface that
+    ends on a tag question ("Assistant, you caught all that, right?"): the request usually follows a pause (MSI-Bench:
+    5 of 21 answers started inside the cue)."""
+    words = re.findall(r"[a-z']+", text.lower())
+    rest = [w for w in words if w != ai.lower()]
+    if ai.lower() in text.lower() and all(w in ("hey", "hi", "hello", "ok", "okay", "um", "so", "oh", "yo") for w in rest):
+        return True
+    return (ai.lower() in text.lower() and len(words) <= 9
+            and re.search(r"\b(right|yeah|okay|ok|yes|got that|caught (all )?(of )?that|follow(ing)?)\s*\?\s*$", text.lower()) is not None)
 
 
 def echoes(reply, line, run=6):

@@ -60,6 +60,8 @@ def test_vocative_only():
     assert agent.vocative_only("Hey, Higgs.", "Higgs") and agent.vocative_only("Higgs?", "Higgs")
     assert not agent.vocative_only("Hey Higgs, how long can the video be?", "Higgs")
     assert not agent.vocative_only("Hey there.", "Higgs")
+    assert agent.vocative_only("Assistant, you caught all that, right?", "Assistant")
+    assert not agent.vocative_only("Higgs, the deadline is Saturday, right? Because Sam said Sunday.", "Higgs")
 
 
 def test_vocative_person():
