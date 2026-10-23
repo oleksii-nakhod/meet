@@ -49,6 +49,15 @@ LANG = os.environ.get("MEET_LANG", "en")           # transcription language hint
 SPECULATE = os.environ.get("MEET_SPECULATE", "1") == "1"  # voice likely replies while the judge decides
 PROMPT = os.environ.get("MEET_PROMPT", "v5")       # judge prompt (see judge_prompt)
 SIGNALS = os.environ.get("MEET_SIGNALS", "1") == "1"  # per-person turn-taking models (about one CPU core each)
+# When Higgs STT fails, a line is transcribed locally instead. 2026-10-23 (hackathon day) Higgs STT answered 5 of 6
+# clean TTS lines with the text "the transcription is not available right now" after exactly ~3.05 s (a healthy
+# transcript: ~0.3 s), so improved Higgs heard nothing and stayed idle. A line waits STT_WAIT s for Higgs; then
+# faster-whisper base.en transcribes the same audio (~0.6 s on 8 threads; small.en took 2.7 s for any line, as Whisper
+# pads to 30 s windows). After a failure in the last minute the local transcript starts with the Higgs request
+# instead of after it. Each use is logged as stt_fallback.
+STT_FALLBACK = os.environ.get("MEET_STT_FALLBACK", "1") == "1"
+STT_WAIT = float(os.environ.get("MEET_STT_WAIT", "1.0"))
+STT_FAILED = re.compile(r"transcription is not available", re.I)
 CALLS = {"n": 0}
 # In 1:1 Mm-hm a commit after 0.1 s of silence is a cancellable guess. Here a committed line is transcribed and judged
 # (7 requests) and shown to everyone, so a line ends only after a real pause: 0.45 s with the turn-taking model
@@ -82,6 +91,39 @@ REPLY_SYS2 = ("You are {ai}, an AI participant with a voice in an online meeting
               "teammate would say: one or two short spoken sentences, under 30 words, no lists, no preamble.")
 PERSONA = ("You are {ai}, an AI participant with a voice in an online meeting ({setting}) with {people}. "
            "What you know: {facts} Keep each reply to one or two short spoken sentences.")
+
+
+class LocalSTT:
+    """faster-whisper base.en on the CPU, loaded in the background at server start (~5 s, ~0.3 GB)."""
+
+    def __init__(self):
+        self.model, self.ready = None, threading.Event()
+        self.last_fail = -1e9  # time.monotonic() of the last Higgs STT failure
+        threading.Thread(target=self._load, daemon=True).start()
+
+    def _load(self):
+        try:
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            from faster_whisper import WhisperModel
+            self.model = WhisperModel("base.en", device="cpu", compute_type="int8", cpu_threads=8, num_workers=2)
+        except Exception as e:  # noqa: BLE001
+            print(f"local STT unavailable: {e!r}", flush=True)
+        finally:
+            self.ready.set()
+
+    def transcribe(self, pcm24k):
+        """int16 24 kHz -> text ("" if the model isn't there). Blocking: run it in a thread."""
+        from scipy.signal import resample_poly
+        self.ready.wait(30)
+        if self.model is None or not len(pcm24k):
+            return ""
+        x = resample_poly(pcm24k.astype(np.float32) / 32768, 2, 3)  # Whisper wants 16 kHz
+        segs, _ = self.model.transcribe(x, language="en", beam_size=1, condition_on_previous_text=False,
+                                        without_timestamps=True)
+        return " ".join(seg.text.strip() for seg in segs).strip()
+
+
+LOCAL_STT = LocalSTT() if STT_FALLBACK else None
 
 
 def spend(n=1):
@@ -367,6 +409,33 @@ async def hedged(task, again, delay):
 
 
 AVATAR_FILLER = os.environ.get("MEET_AVATAR_FILLER", "1") == "1"  # "Hmm." while the face renders (see _release)
+# With the face on, improved replies are voiced by a Realtime session reading the text (the face can only render once
+# the speech exists, and Realtime has it sooner: complete in ~1.5 s for one sentence vs ~2.0 s with TTS 3, ~2.7 s vs
+# ~5.7 s for three; word for word 6/6, 2026-10-23). MEET_AVATAR_VOICE=tts goes back to TTS 3 and one-sentence replies.
+AVATAR_RT = os.environ.get("MEET_AVATAR_VOICE", "realtime") == "realtime"
+READER = ("You are a text-to-speech engine. Read the user's text aloud exactly as written, word for word, in a natural "
+          "conversational voice. Say nothing else: no greeting, no comment, no question.")
+SPLIT_MIN_S = 5.5  # render the first >= 5.5 s of a long reply first (read_my_lips: the second part's face is ready in time)
+RT_FIRST_S = 2.0   # no Realtime speech this long after asking (~0.6 s normally; a voice session still opening under
+#                    load took 12 s): TTS 3 voices the reply instead
+
+
+def cut_point(pcm, start, min_s=SPLIT_MIN_S):
+    """First pause (>= 120 ms of low energy) at least min_s after `start`, as a sample index, or None
+    (read_my_lips/agent_server.py)."""
+    head = pcm[start:start + int(min_s * SR)].astype(np.float32)
+    tail = pcm[start + int(min_s * SR):].astype(np.float32)
+    win = int(0.04 * SR)
+    n = len(tail) // win
+    if len(head) < int(min_s * SR) or n < 3:
+        return None
+    speech = np.sqrt(np.mean(head[:len(head) // win * win].reshape(-1, win) ** 2, axis=1))
+    thr = max(100.0, 0.1 * float(np.median(speech)))
+    e = np.sqrt(np.mean(tail[:n * win].reshape(n, win) ** 2, axis=1))
+    for i in range(n - 2):
+        if e[i] < thr and e[i + 1] < thr and e[i + 2] < thr:
+            return start + int(min_s * SR) + (i + 1) * win
+    return None
 FILLERS = {"clips": None, "loading": False}
 
 
@@ -503,15 +572,16 @@ class Pool:
 
     MAX_AGE = 240.0  # Higgs closes a session after 5 min without user activity (session.idle_timeout)
 
-    def __init__(self, instructions, size):
+    def __init__(self, instructions, size, cfg=None):
         self.instructions, self.q, self.closed, self.size = instructions, asyncio.Queue(), False, size
+        self.cfg = cfg or {"output_modalities": ["text"]}
         self.opens = 0
         for _ in range(size):
             self._refill()
 
     def _new(self):
         self.opens += 1
-        return Session({"instructions": self.instructions, "output_modalities": ["text"]})
+        return Session({"instructions": self.instructions, **self.cfg})
 
     def _refill(self):
         async def open_one():
@@ -603,10 +673,120 @@ class Pool:
                         self._refill()
         return ""
 
+    async def speak(self, text, on_audio, cancelled):
+        """An audio session reads `text` aloud; on_audio(bytes) gets the speech as it arrives. True once complete."""
+        if not spend():
+            return False
+        s, ok = None, False
+        try:
+            s = await self._take()
+            since = s.now()
+            if cancelled():
+                ok = True  # unused: back to the pool
+                return False
+            await s.say_text(text)
+            _, ev = await s.wait("response.created", timeout=10, since=since)
+            rid = ev["response"]["id"]
+            done = asyncio.ensure_future(s.wait(lambda e: e.get("type") == "response.done"
+                                                and (e.get("response") or {}).get("id") == rid, timeout=30, since=since))
+            n = 0
+            while True:
+                buf = s.audio.get(rid, b"")
+                if len(buf) > n:
+                    on_audio(bytes(buf[n:n + (len(buf) - n) // 2 * 2]))
+                    n += (len(buf) - n) // 2 * 2
+                if done.done():
+                    _, ev = done.result()
+                    buf = s.audio.get(rid, b"")
+                    if len(buf) > n:
+                        on_audio(bytes(buf[n:len(buf) // 2 * 2]))
+                    ok = ev["response"].get("status") in (None, "completed")
+                    return ok and len(buf) > 0
+                if cancelled():
+                    done.cancel()
+                    await s.send({"type": "response.cancel", "response_id": rid})
+                    return False
+                await asyncio.sleep(0.03)
+        except Exception:  # noqa: BLE001
+            return False
+        finally:
+            if s is not None:
+                if ok:
+                    asyncio.ensure_future(self._recycle(s, since))
+                else:
+                    asyncio.ensure_future(close(s))
+                    self._refill()
+
     async def close(self):
         self.closed = True
         while not self.q.empty():
             await close(self.q.get_nowait())
+
+
+class RealtimeSpeaker:
+    """SentenceSpeaker's interface (feed / close / cancel / segments), voiced by a Realtime session reading the whole
+    reply once its text is complete (Pool.speak); falls back to TTS 3 if that fails."""
+
+    def __init__(self, pool, audio, on_done):
+        self.pool, self.audio, self.on_done = pool, audio, on_done
+        self.text, self.cancelled, self.closed, self.fallback, self.finished = "", False, False, None, False
+
+    def feed(self, delta):
+        self.text += delta
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        asyncio.ensure_future(self._run())
+
+    def cancel(self):
+        self.cancelled = self.closed = True
+        if self.fallback:
+            self.fallback.cancel()
+
+    async def _run(self):
+        text = self.text.strip()
+        late = {"v": False}
+        task = asyncio.ensure_future(self.pool.speak(
+            text, lambda b: None if late["v"] else self.audio.extend(b), lambda: self.cancelled or late["v"]))
+        t0 = time.perf_counter()
+        while not task.done() and not self.audio and time.perf_counter() - t0 < RT_FIRST_S:
+            await asyncio.sleep(0.03)
+        if not task.done() and not self.audio:  # too slow to start: don't keep the room waiting
+            late["v"] = True
+            task.add_done_callback(lambda f: f.exception())
+            ok = False
+        else:
+            ok = bool(text) and await task
+        if self.cancelled:
+            return
+        if not ok:  # no Realtime voice this time: TTS 3 from the start (whatever arrived is dropped)
+            del self.audio[:]
+            self.fallback = SentenceSpeaker(VOICE, self.audio, self.on_done)
+            self.fallback.feed(text)
+            self.fallback.close()
+            return
+        self.finished = True
+        self.on_done()
+
+    @property
+    def segments(self):
+        """(start, end, sentence) spans for floor.truncate, in proportion to each sentence's length (Realtime gives no
+        per-sentence timing). A long reply can be interrupted before all its speech has arrived (it plays once its
+        first part's face is ready): until then the total is estimated at ~15 characters a second."""
+        if self.fallback is not None:
+            return self.fallback.segments
+        text = self.text.strip()
+        sents = [x for x in re.split(r"(?<=[.!?])\s+", text) if x.strip()]
+        n = sum(len(x) for x in sents) or 1
+        total = len(self.audio) // 2 if self.finished else max(len(self.audio) // 2, int(len(text) / 15 * SR))
+        out, at = [], 0
+        for x in sents:
+            end = at + round(total * len(x) / n)
+            out.append((at, end, x))
+            at = end
+        return out
 
 
 class DefaultBrain:
@@ -616,6 +796,8 @@ class DefaultBrain:
         self.a = agent
         self.engine = Engine(mode="server_vad", instructions=agent.persona(), voice=VOICE)
         self.k = 0  # engine.log entries handled
+        # Avatar on: each reply is held until all of it has arrived and its face is rendering, then plays (no
+        # "Hmm." filler and no early part, unlike improved: the wait is part of what plain Higgs looks like)
 
     async def start(self):
         spend()
@@ -633,6 +815,10 @@ class DefaultBrain:
         mix = np.zeros(N, np.int32)
         for f in frames.values():
             mix += f
+        self.engine.hold_replies = self.a.avatar
+        cur = self.engine.current
+        if cur is not None and cur.hold and not self.a.avatar:  # the avatar was switched off while it waited
+            cur.hold = False
         out = await self.engine.tick(np.clip(mix, -32768, 32767).astype(np.int16))
         for e in self.engine.log[self.k:]:
             kind = e["kind"]
@@ -643,17 +829,61 @@ class DefaultBrain:
                 await self.a.line(None, "the room", e["text"].strip(), {"speak": True, "why": "default Higgs answers every turn"})
             elif kind == "respond":
                 spend()
-                await self.a.status("speaking")
+                t = self.engine.turns.get(e.get("rid"))
+                if t is not None and t.hold:
+                    t.vstarted = False
+                    asyncio.ensure_future(self._render(t))
+                    await self.a.status("thinking")
+                else:
+                    await self.a.status("speaking")
             elif kind == "stop":
+                t = self.engine.turns.get(e.get("rid"))
+                if t is not None and getattr(t, "vstarted", False):
+                    await self.a.room.avatar_stop()
                 await self.a.room.ai_flush()
                 await self.a.status("listening", stopped=e.get("why"))
             elif kind == "response_done" and e.get("text"):
                 self.a.history.append({"speaker": self.a.ai, "text": e["text"]})
                 await self.a.room.event({"type": "ai_say", "text": e["text"]})
             elif kind == "play_end":
+                t = self.engine.turns.get(e.get("rid"))
+                if t is not None and getattr(t, "vstarted", False):
+                    await self.a.room.avatar_stop()
                 await self.a.status("listening")
         self.k = len(self.engine.log)
         return out if self.engine.state == "playing" else None
+
+    async def _render(self, t):
+        """Render a held reply once all its audio is in; its first video chunk releases the audio."""
+        live = lambda: self.engine.current is t and t.hold  # noqa: E731  (stopped, or released without a face)
+        while live() and not t.done:
+            await asyncio.sleep(0.05)
+        if not live():
+            return
+        if not spend():
+            t.hold = False
+            return
+        pcm = np.frombuffer(bytes(t.audio[:len(t.audio) // 2 * 2]), np.int16)[:SR * 59]  # the Avatar takes <= 60 s
+        loop = asyncio.get_running_loop()
+
+        async def video(c):
+            if self.engine.current is not t:
+                return
+            if not t.vstarted:
+                t.vstarted = True
+                await self.a.room.avatar_start(avatar.MIME)
+            await self.a.room.send_avatar_chunk(c)
+            if t.hold:
+                t.hold = False
+                await self.a.status("speaking")
+        try:
+            await asyncio.to_thread(avatar.render, pcm, lambda c: loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(video(c))), lambda: self.engine.current is not t)
+        except Exception as e:  # noqa: BLE001  (no face this time: speak anyway)
+            await self.a.room.event({"type": "ai_error", "error": f"avatar: {e!r}"[:300]})
+        if t.hold and self.engine.current is t:
+            t.hold = False
+            await self.a.status("speaking")
 
 
 class Listener:
@@ -676,6 +906,7 @@ class Listener:
         self.backlog = []        # audio to send once a (re)opened transcription session is up
         self.commit_waiting = None  # a line ended while the session was down: commit it after the backlog
         self.opener = None
+        self.line_audio = []     # this line's frames as sent to STT, for the local fallback
 
     def _new_session(self):
         tr = {"model": "higgs-stt-3.1", **({"language": LANG} if LANG else {})}
@@ -715,8 +946,8 @@ class Listener:
                     await s.send({"type": "input_audio_buffer.append", "audio": base64.b64encode(f.tobytes()).decode()})
                 self.open = True
                 if self.commit_waiting is not None:
-                    t_end, self.commit_waiting = self.commit_waiting, None
-                    asyncio.ensure_future(self._transcribe(t_end))
+                    (t_end, audio), self.commit_waiting = self.commit_waiting, None
+                    asyncio.ensure_future(self._transcribe(t_end, audio))
                 return
         self.opener = asyncio.ensure_future(go())
 
@@ -732,6 +963,8 @@ class Listener:
 
     async def _append(self, pcm):
         self.sent += 1
+        if LOCAL_STT is not None and len(self.line_audio) < 3000:  # 60 s
+            self.line_audio.append(pcm)
         if self.open and self.session.close_code is None:
             try:
                 await self.session.send({"type": "input_audio_buffer.append",
@@ -778,37 +1011,59 @@ class Listener:
                 self.t_speech_end = time.perf_counter() - self.gate.silence
                 self.commit_info = {"why": self.gate.why, "p_now": None if self.p_now is None else round(self.p_now, 2),
                                     "lag": self.signals.lag() if self.signals is not None else None}
+                audio, self.line_audio = self.line_audio, []
                 if self.open:
-                    asyncio.ensure_future(self._transcribe(time.perf_counter()))
+                    asyncio.ensure_future(self._transcribe(time.perf_counter(), audio))
                 else:
-                    self.commit_waiting = time.perf_counter()
+                    self.commit_waiting = (time.perf_counter(), audio)
             elif act == "resume":
                 self.merge = True
                 self.b.on_resume(self)
 
-    async def _transcribe(self, t_end):
+    async def _transcribe(self, t_end, audio=()):
         self.decided_early = False
         try:
-            await self._transcribe_and_decide(t_end)
+            await self._transcribe_and_decide(t_end, audio)
         finally:
             if not self.decided_early:
                 self.in_flight = max(0, self.in_flight - 1)
 
-    async def _transcribe_and_decide(self, t_end):
+    async def _transcribe_and_decide(self, t_end, audio=()):
         if not spend():
             return
         s = self.session
         since = s.now()
+        fallback = LOCAL_STT is not None and len(audio) > 0
+        failed, local, t0 = None, None, time.perf_counter()
+        if fallback and time.monotonic() - LOCAL_STT.last_fail < 60:  # Higgs STT is failing: don't wait for it first
+            local = asyncio.ensure_future(asyncio.to_thread(LOCAL_STT.transcribe, np.concatenate(audio)))
         try:
             await s.send({"type": "input_audio_buffer.commit"})
-            _, ev = await s.wait("input_audio_buffer.committed", timeout=10, since=since)
+            _, ev = await s.wait("input_audio_buffer.committed", timeout=STT_WAIT if fallback else 10, since=since)
             item = ev.get("item_id")
+            left = max(0.05, STT_WAIT - (time.perf_counter() - t0)) if fallback else 30  # STT_WAIT covers both waits
             _, ev = await s.wait(lambda e: e.get("type") == "conversation.item.input_audio_transcription.completed"
-                                 and e.get("item_id") == item, timeout=30, since=since)
+                                 and e.get("item_id") == item, timeout=left, since=since)
+            text = (ev.get("transcript") or "").strip()
+            if STT_FAILED.search(text):
+                failed = text
         except Exception as e:  # noqa: BLE001
-            await self.b.a.room.event({"type": "ai_error", "error": f"transcription ({self.name}): {e!r}"[:200]})
-            return
-        text = (ev.get("transcript") or "").strip()
+            failed = "timeout" if isinstance(e, (asyncio.TimeoutError, TimeoutError)) else repr(e)
+        if failed is not None:
+            if not fallback:
+                await self.b.a.room.event({"type": "ai_error", "error": f"transcription ({self.name}): {failed}"[:200]})
+                return
+            LOCAL_STT.last_fail = time.monotonic()
+            t1 = time.perf_counter()
+            text = await (local or asyncio.to_thread(LOCAL_STT.transcribe, np.concatenate(audio)))
+            room = self.b.a.room
+            room.log({"type": "stt_fallback", "slot": self.slot, "name": self.name, "higgs": failed[:120], "text": text,
+                      "early": local is not None, "local_s": round(time.perf_counter() - t1, 2),
+                      "total_s": round(time.perf_counter() - t0, 2)})
+            if not getattr(self.b.a, "told_stt", False):
+                self.b.a.told_stt = True
+                await room.event({"type": "ai_note", "text": "Higgs transcription is failing right now; "
+                                                             "lines are transcribed locally (Whisper) until it's back."})
         self.t_transcript = time.perf_counter()
         if text:
             merge, self.merge = self.merge, False
@@ -819,7 +1074,7 @@ class Reply:
     """A reply being voiced (TTS 3, sentence by sentence). Given `text` it is complete at once; given None, its text
     streams in through feed() (spoken while it arrives) until close()."""
 
-    def __init__(self, line_id, listener, line_text, text, t_end, one=False, ai=None):
+    def __init__(self, line_id, listener, line_text, text, t_end, one=False, ai=None, reader=None):
         self.line_id, self.listener, self.line_text, self.t_end = line_id, listener, line_text, t_end
         self.text, self.closed = "", False
         self.one = one           # only the first sentence (Avatar on: its render waits for the whole speech)
@@ -838,7 +1093,9 @@ class Reply:
         self.cancel = False
         self.started = False     # first audio frame sent
         self.marks = {"created": time.perf_counter()}  # when each stage finished (perf_counter), for timing logs
-        self.speaker = SentenceSpeaker(VOICE, self.audio, lambda: setattr(self, "done", True))
+        self.rt = reader is not None  # voiced by a Realtime session (Avatar on), not TTS 3
+        done = lambda: setattr(self, "done", True)  # noqa: E731
+        self.speaker = RealtimeSpeaker(reader, self.audio, done) if self.rt else SentenceSpeaker(VOICE, self.audio, done)
         if text is not None:
             self.feed(text)
             self.close()
@@ -870,7 +1127,8 @@ class Reply:
             self.closed = True
             self.text = self.text.strip().strip('"')
             t = self.text
-            spend(max(1, t.count(".") + t.count("?") + t.count("!")))  # roughly one TTS request per sentence
+            if not self.rt:  # Pool.speak counts its own request
+                spend(max(1, t.count(".") + t.count("?") + t.count("!")))  # roughly one TTS request per sentence
             self.speaker.close()
 
 
@@ -895,6 +1153,15 @@ class ImprovedBrain:
         self.voice_at = 0.0       # perf_counter when anyone last made a sound
         self.line_by = {}         # line id -> slot of who said it
         self.out_db = deque([-90.0], maxlen=30)  # Higgs's output level over the last 0.6 s (echo gate)
+        self.reader = None        # Pool of Realtime voice sessions for replies with the face on (opened on first use)
+
+    def voice(self):
+        """The reader pool when the face is on and Realtime voices it, else None (TTS 3)."""
+        if not (self.a.avatar and AVATAR_RT):
+            return None
+        if self.reader is None or self.reader.closed:
+            self.reader = Pool(READER, 1, cfg={"output_modalities": ["audio"], "audio": {"output": {"voice": VOICE}}})
+        return self.reader
 
     def point(self):
         a = self.a
@@ -918,6 +1185,7 @@ class ImprovedBrain:
                 await pool.close()
 
     async def start(self):
+        self.voice()  # avatar on: open the Realtime voice session now, not on the first reply
         await self.on_roster(self.a.room.people())
 
     def dead(self):
@@ -933,6 +1201,8 @@ class ImprovedBrain:
         if self.pools:
             for pool in self.pools.values():
                 await pool.close()
+        if self.reader:
+            await self.reader.close()
         self._cancel_pending()
 
     async def on_roster(self, people):
@@ -1002,13 +1272,15 @@ class ImprovedBrain:
         convo = f"Conversation so far:\n{ctx}\n{li.name}: {text}\n\nReply as {a.ai}:"  # "Your reply:" was continued as a person
         addressed = (len(self.listeners) == 1 or re.search(rf"\b{re.escape(a.ai)}\b", text, re.I) is not None
                      or named_ai_before(context, li.name, a.ai))
-        if a.avatar:  # the face renders only once the whole reply is spoken, and TTS takes about as long as the speech
+        reader = self.voice()
+        one = a.avatar and reader is None  # TTS 3 + face: one sentence (its render waits for the whole speech)
+        if one:  # the face renders only once the whole reply is spoken, and TTS takes about as long as the speech
             convo = "[Answer in one short sentence of at most 12 words.]\n" + convo
         # Likely a reply (a one-to-one call, the AI's name, a question): voice the draft while it streams in and the
         # judge decides (~0.5 s sooner). Otherwise draft only; a silent line costs no speech.
         spec = None
         if SPECULATE and (len(self.listeners) == 1 or a.ai.lower() in text.lower() or text.rstrip().endswith("?")):
-            spec = Reply(line_id, li, text, None, t_end, one=a.avatar, ai=a.ai)
+            spec = Reply(line_id, li, text, None, t_end, one=one, ai=a.ai, reader=reader)
         writer = pools["write"] if facts_relevant(text, context[-2:], a.facts, [a.ai] + a.names()) else pools["write0"]
         draft = asyncio.ensure_future(writer.ask(convo, retries=1, on_delta=spec.feed if spec else None))
         # both drafts start with the decision, so a correction costs no extra wait (rewriting it after: ~1 s)
@@ -1060,7 +1332,7 @@ class ImprovedBrain:
                                     "booking): don't volunteer for tasks.]\n" + convo_used, retries=1)).strip().strip('"') or ans
             t_draft = time.perf_counter()
         ans = re.sub(rf"^\s*{re.escape(a.ai)}\s*:\s*", "", ans, flags=re.I)  # "Higgs: Judging is ..."
-        if a.avatar:  # one sentence with the face on: the render waits for the whole reply's speech
+        if one:  # one sentence with the face on: the render waits for the whole reply's speech
             ans = first_sentence(ans).strip().strip('"')
         if spec and (not ans or spec.text.strip().strip('"') != ans):  # the stream failed and a retry answered
             spec.speaker.cancel()
@@ -1088,7 +1360,7 @@ class ImprovedBrain:
             spec.close()
             self.pending = spec
         else:
-            self.pending = Reply(line_id, li, text, ans, t_end)
+            self.pending = Reply(line_id, li, text, ans, t_end, reader=reader)
         self.pending.vocative = vocative_only(text, a.ai)
         self.pending.addressed = addressed
         self.pending.correction = bool(why.get("wrong"))
@@ -1226,8 +1498,11 @@ class ImprovedBrain:
                 r.pos += len(a) // 2
             elif r.done:
                 self.playing = None
+                r.cancel = True  # the words are over: video still rendering (a part's padding) isn't sent
                 if r.vstarted:
                     await self.a.room.avatar_stop()
+                    self.a.room.log({"type": "avatar_reply", "parts": getattr(r, "parts", 0), "voice": ("tts-fallback" if r.speaker.fallback
+                                     else "realtime") if r.rt else "tts", "audio_s": round(len(r.audio) / 2 / SR, 1), "words": len(r.text.split())})
                 await self.a.status("listening")
         self.last_out = out if out is not None else np.zeros(N, np.int16)
         return out
@@ -1249,15 +1524,10 @@ class ImprovedBrain:
 
     async def _render(self, r):
         """Render the reply through Higgs Avatar once its speech is complete. Chunks are held in r.vbuf until the
-        reply is released to the room (_release), then streamed to everyone as they come."""
-        while not r.done and not r.cancel:
-            await asyncio.sleep(0.05)
-        if r.cancel or not spend():
-            r.video = True
-            return
-        pcm = np.frombuffer(bytes(r.audio[:len(r.audio) // 2 * 2]), np.int16)
+        reply is released to the room (_release), then streamed to everyone as they come. A long Realtime-voiced reply
+        renders in two parts: its first >= 5.5 s as soon as that much speech exists (cut at a pause), then the rest;
+        the page appends both to one MediaSource in sequence (read_my_lips --split)."""
         loop = asyncio.get_running_loop()
-        r.marks["render"] = time.perf_counter()
 
         def on_chunk(c):
             def deliver():
@@ -1269,11 +1539,32 @@ class ImprovedBrain:
                 else:
                     r.vbuf.append(c)
             loop.call_soon_threadsafe(deliver)
-        try:
-            await asyncio.to_thread(avatar.render, pcm, on_chunk, lambda: r.cancel)
-        except Exception as e:  # noqa: BLE001  (no face this time: speak anyway)
-            await self.a.room.event({"type": "ai_error", "error": f"avatar: {e!r}"[:300]})
-            r.video = True
+        start, part = 0, 0
+        while True:
+            cut = None
+            while not r.cancel:
+                pcm = np.frombuffer(bytes(r.audio[:len(r.audio) // 2 * 2]), np.int16)
+                if r.done:
+                    break
+                cut = cut_point(pcm, start) if r.rt and part == 0 else None
+                if cut:
+                    break
+                await asyncio.sleep(0.05)
+            if r.cancel or not spend():
+                r.video = True
+                return
+            end = cut or min(len(pcm), start + SR * 59)  # the Avatar takes <= 60 s
+            r.marks.setdefault("render", time.perf_counter())
+            r.parts = part + 1
+            try:
+                await asyncio.to_thread(avatar.render, pcm[start:end], on_chunk, lambda: r.cancel)
+            except Exception as e:  # noqa: BLE001  (no face this time: speak anyway)
+                await self.a.room.event({"type": "ai_error", "error": f"avatar: {e!r}"[:300]})
+                r.video = True
+                return
+            if not cut:
+                return
+            start, part = end, part + 1
 
     async def _send_video(self, r, chunks):
         if not r.vstarted:
@@ -1443,14 +1734,15 @@ class HiggsAgent:
             self._launch()
 
     def set_avatar(self, on):
-        """Improved mode only: plain Realtime audio arrives in bursts and has no reply boundary to render on."""
+        """Both modes: improved renders ahead (Realtime voice, a "Hmm." filler, long replies in two parts); default
+        holds each whole reply until its face renders (DefaultBrain)."""
         self.avatar = bool(on)
         if self.avatar and AVATAR_FILLER:
             load_fillers()
         if self.avatar:
             asyncio.ensure_future(self.room.avatar_idle(avatar.IDLE_URL))
-        if self.avatar and self.mode == "default":
-            asyncio.ensure_future(self.room.event({"type": "ai_note", "text": "The avatar works in improved mode."}))
+            if isinstance(self.brain, ImprovedBrain):
+                self.brain.voice()
 
     def _pop(self, slot):
         q = self.inq.get(slot)

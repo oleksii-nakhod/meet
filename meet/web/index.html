@@ -15,8 +15,12 @@ header { display: flex; gap: 12px; align-items: baseline; margin-bottom: 20px; }
 .sub { color: var(--muted); font-size: 14px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 22px; }
 label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
-input, textarea { width: 100%; font: inherit; font-size: 15px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; }
+input, textarea, select { width: 100%; font: inherit; font-size: 15px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; }
 textarea { min-height: 130px; resize: vertical; }
+select { appearance: auto; }
+.pinfo { font-size: 13px; color: var(--muted); margin-top: 8px; line-height: 1.45; }
+.pinfo ol { margin: 6px 0 0; padding-left: 20px; color: var(--ink); }
+.pinfo b { color: var(--ink); font-weight: 600; }
 .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 button { font: inherit; border: 0; border-radius: 12px; padding: 13px 20px; cursor: pointer; background: var(--ink); color: var(--bg); font-weight: 650; margin-top: 18px; width: 100%; }
 button:disabled { opacity: .5; cursor: default; }
@@ -32,6 +36,8 @@ button:disabled { opacity: .5; cursor: default; }
 <main>
   <header><span class="brand">Meet <span>+ Higgs</span></span><span class="sub">a small video call with an AI in the room</span></header>
   <section class="card" id="form">
+    <label for="preset">Meeting script</label><select id="preset"></select>
+    <div class="pinfo" id="pinfo"></div>
     <label for="title">Room title</label><input id="title" value="Team sync" maxlength="120">
     <div class="row">
       <div><label for="ai">AI name</label><input id="ai" value="Higgs" maxlength="40"></div>
@@ -52,6 +58,7 @@ Submissions close Saturday at 3 pm.</textarea>
     <button id="join">Join now</button>
   </section>
 </main>
+<script src="/agendas.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const store = (k, v) => { try { if (v === undefined) return sessionStorage.getItem(k); sessionStorage.setItem(k, v); } catch { return null; } };
@@ -60,13 +67,34 @@ if (fromUrl) { store("meet_admin", fromUrl); history.replaceState(null, "", loca
 $("admin").value = store("meet_admin") || "";
 fetch("/api/config").then((r) => r.json()).then((c) => { if (c.admin_required && !$("admin").value) $("adminrow").classList.remove("hidden"); });
 
+// A preset fills the form (still editable) and gives the call its script; "Custom" keeps whatever is in the form.
+const local = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
+for (const a of AGENDAS) $("preset").add(new Option(`${a.name} · ${a.people === 1 ? "1 person" : `${a.people} people`}`, a.id));
+$("preset").add(new Option("Custom (no script)", ""));
+const pick = () => {
+  const a = AGENDAS.find((x) => x.id === $("preset").value);
+  local("meet_preset", $("preset").value);
+  const info = $("pinfo");
+  info.replaceChildren();
+  if (!a) { info.textContent = "Fill in the room yourself; the call won't show a script."; return; }
+  $("title").value = a.title; $("ai").value = a.ai; $("setting").value = a.setting; $("facts").value = agendaFacts(a).join("\n");
+  const lines = a.script.filter((x) => x.say || x.chat).length;
+  const cast = document.createElement("b"); cast.textContent = a.cast.join(", ");
+  const ol = document.createElement("ol");
+  for (const x of a.agenda) ol.appendChild(document.createElement("li")).textContent = x;
+  info.append(a.blurb + " ", document.createElement("br"), "Cast: ", cast, ` · ${lines} lines`, ol);
+};
+$("preset").value = AGENDAS.some((a) => a.id === local("meet_preset")) || local("meet_preset") === "" ? local("meet_preset") : AGENDAS[0].id;
+$("preset").onchange = pick;
+pick();
+
 $("create").onclick = async () => {
   $("create").disabled = true; $("err").textContent = "";
   try {
     const body = {
       title: $("title").value.trim(), ai: $("ai").value.trim() || "Higgs", setting: $("setting").value.trim(),
       facts: $("facts").value.split("\n").map((s) => s.trim()).filter(Boolean), passcode: $("passcode").value.trim(),
-      admin: $("admin").value.trim(),
+      admin: $("admin").value.trim(), agenda: $("preset").value,
     };
     const r = await fetch("/api/rooms", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const d = await r.json();

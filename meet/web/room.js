@@ -17,9 +17,10 @@ window.addEventListener("unhandledrejection", (e) => W.errors.push(String(e.reas
 
 let info, pid, myName, passcode = QS.get("k") || "";
 let ws, vws, ctx, mixer, micNode, stream, camVideo, left = false, joined = false, retry = 0, vretry = 0;
-let muted = false, camOn = true, selfPeak = 0, capBusy = false;
+let muted = false, camOn = true, selfPeak = 0, capBusy = false, capTimer;
 const tiles = {}; // slot -> tile element
 let aiName = "Higgs";
+let agenda = null, step = 0; // the room's script (web/agendas.js) and the shared cursor in it
 
 function newPid() {
   const a = new Uint8Array(12); crypto.getRandomValues(a);
@@ -44,6 +45,8 @@ async function init() {
   $("jsub").textContent = `${info.people} of ${info.max} people here · ${info.ai} (AI) is in the room`;
   $("jname").value = store(localStorage, "meet_name") || "";
   if (info.passcode) { $("jkrow").classList.remove("hidden"); $("jk").value = passcode; }
+  agenda = (window.AGENDAS || []).find((a) => a.id === info.agenda) || null;
+  if (agenda) { castButtons(); renderScript(); }
   $("jform").classList.remove("hidden");
   ($("jname").value ? $("jgo") : $("jname")).focus();
 }
@@ -74,13 +77,14 @@ async function setupMedia() {
     stream = await navigator.mediaDevices.getUserMedia({ audio });
     camOn = false;
   }
+  stream.getVideoTracks().forEach((t) => (t.enabled = camOn)); // a rejoin keeps "Camera off"
   ctx = new AudioContext({ sampleRate: 24000 });
   await ctx.audioWorklet.addModule("/worklets.js");
   micNode = new AudioWorkletNode(ctx, "mic-processor");
   ctx.createMediaStreamSource(stream).connect(micNode);
   mixer = new AudioWorkletNode(ctx, "mixer-processor", { outputChannelCount: [2] });
   mixer.connect(ctx.destination);
-  ctx.resume();
+  ctx.resume().catch(() => {}); // rejects if Leave closes the context first
   micNode.port.onmessage = (e) => {
     const pcm = new Int16Array(e.data);
     let p = 0;
@@ -98,7 +102,7 @@ async function setupMedia() {
   camVideo = document.createElement("video");
   camVideo.muted = true; camVideo.playsInline = true; camVideo.autoplay = true;
   if (stream.getVideoTracks().length) { camVideo.srcObject = stream; camVideo.play().catch(() => {}); }
-  setInterval(capture, 125); // ~8 fps
+  capTimer = setInterval(capture, 125); // ~8 fps
 }
 
 // ---------- control socket ----------
@@ -143,6 +147,7 @@ function onMessage(e) {
   else if (m.type === "ai_note") toast(m.text, "mode");
   else if (m.type === "ai_say") aiSay(m.text);
   else if (m.type === "lab") lab(m);
+  else if (m.type === "script") setStep(m.step, false);
 }
 
 function onRoster(m) {
@@ -152,6 +157,7 @@ function onRoster(m) {
     $("join").classList.add("hidden"); $("call").classList.remove("hidden");
     $("rtitle").textContent = m.title || info.title;
     toast("Use headphones so nobody hears themselves echo.");
+    if (agenda) { markMine(); showScript(store(localStorage, "meet_script") !== "0"); }
   } else if (W.roster) {
     const before = new Set(W.roster.people.map((p) => p.slot + p.name));
     const now = new Set(m.people.map((p) => p.slot + p.name));
@@ -388,6 +394,108 @@ function avatarIdle(url) {
   tiles[0].classList.toggle("idle-on", W.ai.avatar);
 }
 
+// ---------- script ----------
+const EXPECT = { reply: "{ai} answers", silent: "{ai} stays quiet", correct: "{ai} corrects it", continue: "{ai} keeps talking",
+  stop: "{ai} stops", any: "either is fine" };
+const subAi = (t) => t.replaceAll("{ai}", aiName);
+
+function castButtons() {
+  const box = $("jcast").querySelector(".cast");
+  box.replaceChildren();
+  for (const name of agenda.cast) {
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = name;
+    b.classList.toggle("cur", $("jname").value.trim().toLowerCase() === name.toLowerCase());
+    b.onclick = () => { $("jname").value = name; box.querySelectorAll("button").forEach((x) => x.classList.toggle("cur", x === b)); $("jgo").focus(); };
+    box.appendChild(b);
+  }
+  $("jcast").classList.remove("hidden");
+}
+
+function sayNode(text) { // "[2s]" -> a pause chip
+  const d = document.createElement("div");
+  d.className = "say";
+  for (const part of subAi(text).split(/\[(\d+(?:\.\d+)?)s\]/).map((x, i) => [x, i % 2])) {
+    if (!part[1]) { d.append(part[0]); continue; }
+    const p = document.createElement("span"); p.className = "pause"; p.textContent = `pause ${part[0]} s`;
+    d.appendChild(p);
+  }
+  return d;
+}
+
+function renderScript() {
+  $("stitle").textContent = `Script · ${agenda.name}`;
+  $("sagenda").textContent = agenda.agenda.map((x, i) => `${i + 1}. ${x}`).join(" · ");
+  const ol = $("steps");
+  ol.replaceChildren();
+  agenda.script.forEach((x, i) => {
+    const li = document.createElement("li");
+    if (x.h) { li.className = "h"; li.textContent = x.h; ol.appendChild(li); return; }
+    li.className = "step" + (x.act ? " act" : ""); li.dataset.i = i; li.dataset.who = (x.who || "").toLowerCase();
+    if (!x.act) {
+      const w = document.createElement("div"); w.className = "who";
+      const b = document.createElement("b"); b.textContent = x.who;
+      w.append(b, x.over ? `while ${aiName} is talking` : x.chat ? "types in the chat" : "");
+      const e = document.createElement("span"); e.className = `exp ${x.expect}`; e.textContent = subAi(EXPECT[x.expect] || x.expect);
+      w.appendChild(e);
+      if (x.chat) {
+        const c = document.createElement("button"); c.className = "tochat"; c.textContent = "put in chat";
+        c.onclick = (ev) => { ev.stopPropagation(); $("chatin").value = subAi(x.chat); $("chatin").focus(); };
+        w.appendChild(c);
+      }
+      li.appendChild(w);
+    }
+    li.appendChild(sayNode(x.act || x.say || x.chat));
+    if (x.probe) { const p = document.createElement("div"); p.className = "probe"; p.textContent = subAi(x.probe); li.appendChild(p); }
+    li.onclick = () => setStep(i, true);
+    ol.appendChild(li);
+  });
+  setStep(step, false);
+}
+
+function markMine() {
+  const me = (myName || "").toLowerCase();
+  $("steps").querySelectorAll(".step").forEach((li) => li.classList.toggle("mine", !!me && li.dataset.who === me));
+}
+
+function setStep(i, share) {
+  step = i;
+  if (!agenda) return;
+  let cur = null;
+  $("steps").querySelectorAll(".step").forEach((li) => {
+    const n = +li.dataset.i;
+    li.classList.toggle("cur", n === i); li.classList.toggle("done", n < i);
+    if (n === i) cur = li;
+  });
+  if (cur && !$("script").classList.contains("hidden")) cur.scrollIntoView({ block: "center", behavior: "smooth" });
+  if (share) send({ type: "script", step: i }); // everyone's cursor follows, and the room log marks the step
+}
+
+function moveStep(d) {
+  const all = [...$("steps").querySelectorAll(".step")].map((li) => +li.dataset.i);
+  const k = all.indexOf(step);
+  const next = all[Math.max(0, Math.min(all.length - 1, (k < 0 ? 0 : k) + d))];
+  if (next !== undefined) setStep(next, true);
+}
+
+function showScript(on) {
+  $("script").classList.toggle("hidden", !on); $("body").classList.toggle("with-script", on);
+  $("scriptbtn").classList.remove("hidden"); $("scriptbtn").classList.toggle("on", on);
+  $("scriptbtn").textContent = on ? "Hide script" : "Script";
+  store(localStorage, "meet_script", on ? "1" : "0");
+  fit();
+  if (on) setStep(step, false);
+}
+
+$("scriptbtn").onclick = () => showScript($("script").classList.contains("hidden"));
+$("sprev").onclick = () => moveStep(-1);
+$("snext").onclick = () => moveStep(1);
+document.addEventListener("keydown", (e) => {
+  if (!agenda || !joined || e.ctrlKey || e.metaKey || e.altKey || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+  if (e.key === "ArrowDown" || e.key === "j") { e.preventDefault(); moveStep(1); }
+  else if (e.key === "ArrowUp" || e.key === "k") { e.preventDefault(); moveStep(-1); }
+});
+
 // ---------- controls ----------
 const send = (o) => { if (!ws || ws.readyState !== 1) return false; ws.send(JSON.stringify(o)); return true; };
 $("mic").onclick = () => {
@@ -420,15 +528,26 @@ $("chatform").onsubmit = (e) => {
 };
 $("leave").onclick = () => leaveCall("You left the call.");
 $("jgo").onclick = join;
-$("jname").onkeydown = $("jk").onkeydown = (e) => e.key === "Enter" && join();
+$("jname").onkeydown = $("jk").onkeydown = (e) => { if (e.key === "Enter") join(); }; // returning false would cancel every key
 
 function leaveCall(msg) {
   left = true; joined = false;
+  if (ws) ws.onmessage = null; // frames still in flight would reach the closed mixer
   try { ws && ws.close(1000); vws && vws.close(1000); } catch {}
   for (const s in tiles) { tiles[s].remove(); delete tiles[s]; }
   W.roster = null;
+  stopMedia();
   $("call").classList.add("hidden"); $("join").classList.remove("hidden");
   $("jerr").textContent = msg; $("jgo").disabled = false; $("jgo").textContent = "Rejoin";
+}
+
+// Release the mic and camera (the browser's in-use indicator goes off); Rejoin asks for them again.
+function stopMedia() {
+  clearInterval(capTimer);
+  stream?.getTracks().forEach((t) => t.stop());
+  if (camVideo) camVideo.srcObject = null;
+  ctx?.close().catch(() => {});
+  stream = ctx = mixer = micNode = camVideo = null;
 }
 
 init().catch((e) => { $("jtitle").textContent = "Couldn't load the room"; $("jerr").textContent = e.message; });

@@ -45,7 +45,8 @@ async def create_room(request: Request):
     if isinstance(facts, str):
         facts = facts.split("\n")
     room = Room(str(body.get("title") or "")[:120], str(body.get("ai") or "Higgs")[:40], str(body.get("setting") or "")[:300],
-                [str(f).strip()[:500] for f in facts][:100], str(body.get("passcode") or "")[:64])
+                [str(f).strip()[:500] for f in facts][:100], str(body.get("passcode") or "")[:64],
+                str(body.get("agenda") or "")[:40])
     ROOMS[room.id] = room
     link = f"/r/{room.id}"
     proto = request.headers.get("x-forwarded-proto") or request.url.scheme
@@ -60,7 +61,7 @@ def room_info(rid: str):
     if not room:
         return JSONResponse({"error": "no such room"}, status_code=404)
     return {"id": rid, "title": room.brief["title"], "ai": room.brief["ai"], "passcode": bool(room.passcode),
-            "people": len(room.humans), "max": 5}
+            "people": len(room.humans), "max": 5, "agenda": room.agenda}
 
 
 @app.get("/r/{rid}")

@@ -27,6 +27,9 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
 .card label { display: block; font-size: 13px; color: var(--muted); margin: 14px 0 4px; }
 .card .primary { width: 100%; margin-top: 18px; padding: 13px; }
 .hint { font-size: 13px; color: var(--muted); margin-top: 14px; border-left: 3px solid var(--warn); padding-left: 10px; }
+#jcast .cast { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+#jcast button { padding: 6px 14px; }
+#jcast button.cur { border-color: var(--accent); color: var(--accent); }
 #jerr { color: var(--danger); font-size: 14px; min-height: 1.4em; margin-top: 8px; }
 
 /* call */
@@ -71,6 +74,37 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
 .tile.ai .cap span { background: rgba(0,0,0,.7); padding: 2px 8px; border-radius: 6px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
 .tile.ai .cap:empty { display: none; }
 
+/* script panel */
+#body.with-script { grid-template-columns: 360px minmax(0, 1fr) 340px; }
+#script { border-right: 1px solid var(--line); background: var(--panel); display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+#script header { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px 8px; border-bottom: 1px solid var(--line); }
+#script header > div:first-child { flex: 1; min-width: 0; }
+#stitle { font-weight: 650; }
+#sagenda { margin-top: 2px; }
+.snav { display: flex; gap: 6px; }
+.snav button { padding: 6px 11px; }
+#steps { list-style: none; margin: 0; padding: 6px 8px 40vh; overflow: auto; min-height: 0; }
+#steps .h { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); padding: 14px 10px 4px; }
+#steps .step { padding: 8px 10px; margin: 2px 0; border-radius: 10px; border: 1px solid transparent; cursor: pointer; }
+#steps .step:hover { border-color: var(--line); }
+#steps .step.done { opacity: .45; }
+#steps .step.cur { background: var(--chip); border-color: var(--accent); opacity: 1; }
+#steps .who { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+#steps .who b { color: var(--ink); font-weight: 650; }
+#steps .mine .who b { color: var(--accent); }
+#steps .mine .say { color: #fff; }
+#steps .say { font-size: 16px; line-height: 1.4; margin: 2px 0; }
+#steps .act .say { font-size: 14px; font-style: italic; color: var(--warn); }
+#steps .pause { display: inline-block; font-size: 11px; font-weight: 650; color: var(--warn); border: 1px dashed var(--warn); border-radius: 99px; padding: 0 7px; margin: 0 3px; vertical-align: 2px; font-style: normal; }
+#steps .probe { font-size: 12px; color: var(--muted); }
+#steps .exp { font-size: 11px; font-weight: 650; border-radius: 99px; padding: 0 7px; border: 1px solid var(--line); }
+#steps .exp.reply { color: var(--ok); border-color: var(--ok); }
+#steps .exp.correct { color: var(--warn); border-color: var(--warn); }
+#steps .exp.stop { color: var(--danger); border-color: var(--danger); }
+#steps .exp.continue { color: var(--ai); border-color: var(--ai); }
+#steps .tochat { font-size: 11px; padding: 0 8px; border-radius: 99px; }
+@media (max-width: 1200px) { #body.with-script { grid-template-columns: 300px minmax(0, 1fr) 290px; } }
+
 /* side panel */
 #side { border-left: 1px solid var(--line); display: grid; grid-template-rows: auto minmax(0, 1.2fr) auto minmax(0, 1fr) auto; min-height: 0; background: var(--panel); }
 #side h3 { margin: 0; padding: 10px 14px 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
@@ -102,7 +136,8 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
 @media (max-width: 860px) {
   #call { height: auto; min-height: 100dvh; display: flex; flex-direction: column; }
   #body { display: contents; }
-  #stage { order: 1; } #controls { order: 2; } #side { order: 3; }
+  #stage { order: 1; } #controls { order: 2; } #script { order: 3; } #side { order: 4; }
+  #script { border-right: 0; border-top: 1px solid var(--line); height: 70vh; }
   #stage { padding: 10px 12px; }
   #side { border-left: 0; border-top: 1px solid var(--line); height: 70vh; }
   #top .sub { display: none; }
@@ -118,6 +153,7 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
     <div class="sub" id="jsub"></div>
     <div id="jform" class="hidden">
       <label for="jname">Your name</label><input id="jname" maxlength="40" autocomplete="name">
+      <div id="jcast" class="hidden"><label>Play as (your lines are highlighted in the script)</label><div class="cast"></div></div>
       <div id="jkrow" class="hidden"><label for="jk">Passcode</label><input id="jk" maxlength="64" autocomplete="off"></div>
       <button id="jgo" class="primary">Join with camera and mic</button>
       <div class="hint">Use headphones: the call doesn't cancel your speakers' echo perfectly, and the AI listens too.</div>
@@ -132,9 +168,17 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
     <span class="title" id="rtitle"></span>
     <span class="sub" id="count"></span>
     <span class="grow"></span>
+    <button id="scriptbtn" class="hidden">Script</button>
     <button id="invite">Copy invite link</button>
   </header>
   <div id="body">
+    <aside id="script" class="hidden">
+      <header>
+        <div><div id="stitle"></div><div class="sub" id="sagenda"></div></div>
+        <div class="snav"><button id="sprev" title="Previous line (↑ or k)">↑</button><button id="snext" title="Next line (↓ or j)">↓</button></div>
+      </header>
+      <ol id="steps"></ol>
+    </aside>
     <div id="stage"><div id="grid"></div></div>
     <aside id="side">
       <h3>Transcript · what Higgs heard and decided</h3>
@@ -156,6 +200,7 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
   </footer>
 </section>
 <div id="toasts"></div>
+<script src="/agendas.js"></script>
 <script src="/room.js"></script>
 </body>
 </html>

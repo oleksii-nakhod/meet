@@ -166,7 +166,9 @@ class Session:
                     print("  !! server error:", json.dumps(ev)[:400])
                 self.events.append((t, ev))
                 for w in list(self._waiters):
-                    if w[0](ev):
+                    if w[1].done():  # its wait() timed out: a late match must not kill this reader
+                        self._waiters.remove(w)
+                    elif w[0](ev):
                         w[1].set_result((t, ev))
                         self._waiters.remove(w)
             # a clean close (1000: idle timeout after 5 min without speech, max duration) ends the loop without raising
@@ -185,8 +187,13 @@ class Session:
                 if t >= since and f(ev):
                     return t, ev
         fut = asyncio.get_running_loop().create_future()
-        self._waiters.append((f, fut))
-        return await asyncio.wait_for(fut, timeout)
+        w = (f, fut)
+        self._waiters.append(w)
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        finally:
+            if w in self._waiters:
+                self._waiters.remove(w)
 
     async def say_text(self, text, create=True):
         await self.send({"type": "conversation.item.create", "item": {

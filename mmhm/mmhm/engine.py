@@ -110,6 +110,7 @@ class Turn:
     speaker: object = None        # SentenceSpeaker when the reply is voiced by TTS 3
     text_done: bool = False
     tts_done: bool = False
+    hold: bool = False            # audio arrives but doesn't play yet (Meet's default mode waits for the Avatar's face)
 
 
 class VAD:
@@ -174,6 +175,7 @@ class Engine:
         self._discard_next = False  # a speculation was aborted before Higgs acknowledged it
         self.stage_direction = None
         self.on_transcript = None   # optional hook(text) -> stage direction: re-plan a speculative reply
+        self.hold_replies = False   # new turns start held (Turn.hold); the caller releases them
         self.unfinished = False     # the latest committed words end mid-sentence (from Higgs input transcription)
         self.model_hold = None      # the VAP-trend model's verdict for the current pause (None = not decided yet)
         self.vap_hist = deque(maxlen=8)
@@ -199,7 +201,7 @@ class Engine:
             typ = ev.get("type", "")
             if typ == "response.created":
                 rid = ev["response"]["id"]
-                self.turns[rid] = Turn(response_id=rid)
+                self.turns[rid] = Turn(response_id=rid, hold=self.hold_replies)
                 if self.expressive:
                     t = self.turns[rid]
                     t.speaker = SentenceSpeaker(self.voice, t.audio, lambda t=t: setattr(t, "tts_done", True))
@@ -336,7 +338,7 @@ class Engine:
         out = np.zeros(N, np.int16)
 
         # agent audio this tick (before gain) -> also feeds channel 2 of the models
-        if self.state == "playing" and self.current is not None:
+        if self.state == "playing" and self.current is not None and not self.current.hold:
             t = self.current
             a = np.frombuffer(bytes(t.audio[t.pos * 2:(t.pos + N) * 2]), np.int16)
             if len(a):

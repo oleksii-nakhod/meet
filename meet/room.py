@@ -140,9 +140,12 @@ class Human:
 
 
 class Room:
-    def __init__(self, title, ai="Higgs", setting="", facts=(), passcode=""):
+    def __init__(self, title, ai="Higgs", setting="", facts=(), passcode="", agenda=""):
         self.id = secrets.token_urlsafe(8)
         self.passcode = passcode or ""
+        # a script from web/agendas.js for the people to read from; the agent never sees it (only the brief), and
+        # every move of the shared cursor is logged, so a run's lines and decisions can be matched to script steps
+        self.agenda, self.script_step = agenda or "", 0
         self.brief = {"title": title or "Meeting", "ai": ai or "Higgs", "setting": setting or "",
                       "facts": [f for f in facts if f]}
         self.mode, self.avatar, self.status = "default", False, "listening"
@@ -154,7 +157,7 @@ class Room:
         self.log_path = os.path.join(LOG_DIR, f"{self.id}.jsonl")
         self._started, self._life, self.errors = False, asyncio.Lock(), 0
         self.agent = HiggsAgent(self)
-        self.log({"type": "created", **self.brief, "passcode": bool(self.passcode)})
+        self.log({"type": "created", **self.brief, "passcode": bool(self.passcode), "agenda": self.agenda})
 
     # ---- for the agent ----
     def people(self):
@@ -253,6 +256,8 @@ class Room:
         self.last_slot[pid] = slot
         self.log({"type": "join", "slot": slot, "name": name, "rejoin": bool(old)})
         h.out.json(self.ai_state())
+        if self.agenda:
+            h.out.json({"type": "script", "step": self.script_step})
         self.roster()
         asyncio.ensure_future(self._lifecycle())
         return h
@@ -305,6 +310,9 @@ class Room:
             self.avatar = bool(m.get("on"))
             await self.event({**self.ai_state(), "by": h.name})
             self._safe(self.agent.set_avatar, self.avatar)
+        elif t == "script" and isinstance(m.get("step"), int) and 0 <= m["step"] < 1000:
+            self.script_step = m["step"]
+            await self.event({"type": "script", "step": self.script_step, "by": h.name})
         elif t in ("cam", "mic"):
             setattr(h, t, bool(m.get("on")))
             self.roster()

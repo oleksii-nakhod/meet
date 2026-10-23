@@ -125,7 +125,7 @@ SCENARIOS2 = [
         ("say", "Priya", "Get the vegetarian one too.", "silent", {"gap": 0.3})]),
 ]
 
-SCENARIOS3 = [  # the Avatar on (improved mode only): audio waits for the face's first video chunk
+SCENARIOS3 = [  # the Avatar on: audio waits for the face's first video chunk (default: for the whole reply's face)
     dict(name="av_greet", avatar=True, modes=("improved",), people=["Alex"], steps=[
         ("say", "Alex", "Hey, Higgs.", "reply"),
         ("say", "Alex", "When do submissions close?", "reply"),
@@ -141,6 +141,13 @@ SCENARIOS3 = [  # the Avatar on (improved mode only): audio waits for the face's
         ("talk_over", "Alex", LONG_Q, ("Alex", "Mm-hm."), "continue", {"at": 3.6}),  # after "Hmm.", into the answer
         ("talk_over", "Alex", "Higgs, what's the riskiest part of our plan?", ("Alex", "Wait, sorry, one question."), "stop",
          {"at": 3.6})]),
+    dict(name="av_long", avatar=True, modes=("improved",), people=["Alex"], steps=[  # a long reply: two renders
+        ("say", "Alex", "Higgs, walk me through the whole demo video, minute by minute, in a few sentences.", "reply"),
+        ("say", "Alex", "Okay. And what should the very last line be?", "reply")]),
+    dict(name="av_default", avatar=True, modes=("default",), people=["Alex"], steps=[  # held until the face renders
+        ("say", "Alex", "Hey, Higgs.", "reply"),
+        ("say", "Alex", "When do submissions close?", "reply"),
+        ("talk_over", "Alex", LONG_Q, ("Alex", "Wait, sorry, one question."), "stop", {"at": 2.0})]),
 ]
 
 SCENARIOS4 = [  # long: past Higgs's 5-minute idle timeout (session.idle_timeout), then talk again

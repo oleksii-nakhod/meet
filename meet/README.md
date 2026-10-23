@@ -41,12 +41,18 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
     people kept talking (8 s in a quiet room). Every reply that was decided but not spoken logs `reply_skipped`.
   - **While Higgs talks:** a listener's "mm-hm" only ducks it. A real interruption stops it, and Higgs remembers
     only what was heard (`floor.py`, ported from `mmhm/engine.py`; 16 unit tests).
-- **Avatar** (improved mode, off by default): replies are one sentence; Higgs Avatar renders it as soon as its speech
-  is ready, into a buffer, and video and audio are released together when the floor opens. A reply is ~4.1 s after
-  the line (median of 9 in `tests/scenarios.py --set 3`; ~1.6 s without the face), so a pre-rendered "Hmm." in the
-  same face and voice plays ~1.5 s after the line while it renders (`MEET_AVATAR_FILLER=0` turns it off). Only
-  someone taking the floor (0.8 s of speech) cancels a reply while its face renders; a "mm" doesn't. A pre-rendered
-  idle loop plays between replies.
+- **Avatar** (both modes, off by default; the face is the uncropped Boson docs portrait). Improved: a reply is voiced
+  by a Realtime session reading the writer's text (its whole speech exists sooner than with TTS 3: ~1.5 s vs ~2.0 s
+  for one sentence, ~2.7 s vs ~5.7 s for three; TTS 3 takes over if Realtime hasn't started within 2 s), Higgs Avatar
+  renders it into a buffer, and video and audio are released together when the floor opens. A long reply renders in
+  two parts: its first >= 5.5 s as soon as that much speech exists, then the rest (read_my_lips `--split`; Chromium
+  and Firefox play both renders as one stream). Replies are normal length again (they were one sentence with TTS 3;
+  `MEET_AVATAR_VOICE=tts` goes back to that). A pre-rendered "Hmm." in the same face and voice plays ~1.5–2.4 s after
+  the line while it renders (`MEET_AVATAR_FILLER=0` turns it off); the answer's face starts 3.7–5.0 s after the line
+  (2026-10-23, `--set 3`, 12/12; 9–15 s answers ~5–6.6 s). Only someone taking the floor (0.8 s of speech) cancels a
+  reply while its face renders; a "mm" doesn't. Default: each whole Realtime reply is held until its face renders
+  (~2.9–3.7 s, no filler, no early part: the wait is what plain Higgs plus a face looks like), and speech stops it as
+  before. A pre-rendered idle loop plays between replies.
 
 Scripted test (`tests/meeting_run.py`): roommates meeting B2 from Third Voice's test set, 3 people, 32 lines, 6
 where the AI should speak. Each person's lines are their own fake microphone in headless Chromium, so the
@@ -114,7 +120,7 @@ Env: `MEET_SAMPLES` (judge samples per line; default 1 in a one-to-one call, 3 w
 (Higgs requests per server run, default 30000; the room is told when it runs out), `MEET_PROMPT` (judge, default
 `v5`), `MEET_LINE_SILENCE` (0.30), `MEET_ECHO_DB` (25), `MEET_SPECULATE` (1), `MEET_LANG` (en), `MEET_SPARE_SIGNALS`
 (2 preloaded turn-taking model processes), `MEET_SIGNALS=0` (no per-person turn-taking models: timing falls back to
-silence rules), `MEET_VOICE`.
+silence rules), `MEET_VOICE`, `MEET_STT_FALLBACK=0` (no local transcription when Higgs STT fails: on 2026-10-23 it answered most lines with "the transcription is not available right now" after ~3 s, so faster-whisper base.en transcribes a line Higgs hasn't within `MEET_STT_WAIT` = 1.0 s; logged as `stt_fallback`).
 
 ## Running it for real (2026-10-23 notes)
 
@@ -130,14 +136,23 @@ silence rules), `MEET_VOICE`.
 - **Showing default vs improved live:** default Higgs is reliably derailed by a clear "yeah" or "uh-huh" while it
   talks (it stops and answers the backchannel), by a mid-sentence thinking pause (it talks over it), and by people
   talking to each other (it answers them). A soft hummed "mm" often doesn't trigger its voice detector at all.
-- **Avatar:** replies are one sentence; the face says "Hmm." ~1.5 s after the line and the answer follows ~2.5 s
-  later (it waits for a quiet moment if someone talks into that pause).
+- **Avatar:** in improved the face says "Hmm." ~1.5–2.4 s after the line and the answer follows ~2–3 s later (it
+  waits for a quiet moment if someone talks into that pause); in default the reply just comes ~3 s later than without
+  the face.
 
 ## Rooms
 
 `/` creates a room (title, AI name, setting, facts, optional passcode) and gives a link `/r/<id>?k=<passcode>`; the
 server also prints it. Rooms live in memory; each room logs to `out/rooms/<id>.jsonl`. `/r/<id>?lab` shows the
 agent's turn-taking values on the tiles.
+
+**Meeting scripts** (`web/agendas.js`): the create page offers 9 presets (hackathon planning, the default-vs-improved
+video beats, a house meeting, a launch go/no-go with an AI named Nova, a fast standup with Max, trip planning and a mock
+interview one-to-one, a study group, edge cases). A preset fills the form (facts + the agenda) and gives the call a
+script: who says what, pauses, lines said over the AI, typed lines, and what the AI should do (answer, stay quiet,
+correct, keep talking, stop) with what a right answer contains. The AI never sees the script. The join screen offers
+the cast's names; the cursor is shared (click a line, ↑/↓ or j/k) and each move is logged as a `script` event, so a
+run's lines and decisions can be matched to script steps.
 
 ## Wire format
 
