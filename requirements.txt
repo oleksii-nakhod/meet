@@ -1,0 +1,20 @@
+# then: pip install --no-deps maai==0.2.25   (turn-taking models; its GUI/audio-device deps are stubbed in mmhm/stubs)
+numpy
+scipy
+soundfile
+requests
+websockets
+fastapi
+uvicorn
+torch
+# maai's runtime deps
+einops
+transformers
+huggingface-hub
+pydub
+seaborn
+# local speech-to-text fallback when Higgs STT is down (optional: without it, lines go untranscribed)
+faster-whisper
+# tests only
+playwright
+pytest
