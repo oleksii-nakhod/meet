@@ -44,6 +44,13 @@ def test_join_pieces():
     assert agent.join_pieces("Sorry, I was away.", "Higgs, when do we close?") == "Sorry, I was away. Higgs, when do we close?"
 
 
+def test_first_sentence():
+    assert agent.first_sentence("Sure. The deadline is Saturday at 3 pm. Plan ahead.") == "Sure. The deadline is Saturday at 3 pm."
+    assert agent.first_sentence("The video must be 2 to 3 minutes long. Keep it tight.") == "The video must be 2 to 3 minutes long."
+    assert agent.first_sentence("The video must be", complete_only=True) is None
+    assert agent.first_sentence("Yes.") == "Yes."
+
+
 def test_facts_relevant():
     facts = ["Submissions close Saturday at 3 pm.", "The project is a video call where Higgs joins."]
     assert agent.facts_relevant("When do submissions close?", [], facts, ["Higgs", "Alex"])

@@ -333,6 +333,16 @@ async def hedged(task, again, delay):
 ECHO_DB = float(os.environ.get("MEET_ECHO_DB", "25"))  # quieter than Higgs's output by this much while it talks: echo
 
 
+def first_sentence(text, complete_only=False):
+    """The text up to the end of its first sentence of 4+ words ("Sure." alone is too short). complete_only: None until
+    that sentence has ended (for streaming)."""
+    for m in re.finditer(r"[.!?](?=\s|$)", text):
+        head = text[:m.end()]
+        if len(re.findall(r"[A-Za-z0-9']+", head)) >= 4:
+            return head
+    return None if complete_only else text
+
+
 def frame_db(pcm):
     x = pcm.astype(np.float32) / 32768
     return float(20 * np.log10(np.sqrt(np.mean(x * x)) + 1e-9))
@@ -647,11 +657,16 @@ class Reply:
     """A reply being voiced (TTS 3, sentence by sentence). Given `text` it is complete at once; given None, its text
     streams in through feed() (spoken while it arrives) until close()."""
 
-    def __init__(self, line_id, listener, line_text, text, t_end):
+    def __init__(self, line_id, listener, line_text, text, t_end, one=False):
         self.line_id, self.listener, self.line_text, self.t_end = line_id, listener, line_text, t_end
         self.text, self.closed = "", False
+        self.one = one           # only the first sentence (Avatar on: its render waits for the whole speech)
         self.audio, self.done, self.pos, self.hist_idx = bytearray(), False, 0, None
         self.video = True        # False while its Avatar render hasn't sent the first chunk (audio waits for it)
+        self.render = None       # Avatar render task, started as soon as the speech is done (before the floor opens)
+        self.vbuf = []           # its video chunks, held until the reply is released to the room
+        self.released = False    # the floor opened: chunks go to everyone as they come
+        self.vstarted = False    # avatar_start sent
         self.cancel = False
         self.started = False     # first audio frame sent
         self.marks = {"created": time.perf_counter()}  # when each stage finished (perf_counter), for timing logs
@@ -661,9 +676,17 @@ class Reply:
             self.close()
 
     def feed(self, delta):
-        if not self.closed:
-            self.text += delta
-            self.speaker.feed(delta)
+        if self.closed:
+            return
+        if self.one:
+            cut = first_sentence(self.text + delta, complete_only=True)
+            if cut is not None:
+                self.speaker.feed(cut[len(self.text):])
+                self.text = cut
+                self.close()
+                return
+        self.text += delta
+        self.speaker.feed(delta)
 
     def close(self):
         if not self.closed:
@@ -753,6 +776,7 @@ class ImprovedBrain:
 
     def _cancel_pending(self):
         if self.pending:
+            self.pending.cancel = True  # also stops its Avatar render (one at a time per API key)
             self.pending.speaker.cancel()
             self.pending = None
 
@@ -791,7 +815,7 @@ class ImprovedBrain:
         # judge decides (~0.5 s sooner). Otherwise draft only; a silent line costs no speech.
         spec = None
         if SPECULATE and (len(self.listeners) == 1 or a.ai.lower() in text.lower() or text.rstrip().endswith("?")):
-            spec = Reply(line_id, li, text, None, t_end)
+            spec = Reply(line_id, li, text, None, t_end, one=a.avatar)
         writer = pools["write"] if facts_relevant(text, context[-2:], a.facts, [a.ai] + a.names()) else pools["write0"]
         draft = asyncio.ensure_future(writer.ask(convo, retries=1, on_delta=spec.feed if spec else None))
         # both drafts start with the decision, so a correction costs no extra wait (rewriting it after: ~1 s)
@@ -830,6 +854,8 @@ class ImprovedBrain:
             ans = (await writer.ask("[You are an AI in this call and can't do work outside it (coding, building, "
                                     "booking): don't volunteer for tasks.]\n" + convo_used, retries=1)).strip().strip('"') or ans
             t_draft = time.perf_counter()
+        if a.avatar:  # one sentence with the face on: the render waits for the whole reply's speech
+            ans = first_sentence(ans).strip().strip('"')
         if spec and (not ans or spec.text.strip().strip('"') != ans):  # the stream failed and a retry answered
             spec.speaker.cancel()
             spec = None
@@ -856,6 +882,9 @@ class ImprovedBrain:
             self.pending = spec
         else:
             self.pending = Reply(line_id, li, text, ans, t_end)
+        if a.avatar:  # render ahead, into a buffer: by the time the floor opens the face is (nearly) ready
+            self.pending.video = False
+            self.pending.render = asyncio.ensure_future(self._render(self.pending))
         self.pending.marks.update(speech_end=getattr(li, "t_speech_end", t_end), commit=t_end,
                                   transcript=getattr(li, "t_transcript", t_end), decided=t_decided, draft=t_draft,
                                   speculated=spec is not None)
@@ -901,15 +930,19 @@ class ImprovedBrain:
                 for li2 in self.listeners.values():
                     li2.barge.reset()
                 r.play_why = why
-                if self.a.avatar:  # the face has to move with the words: hold the audio until the video starts
-                    r.video = False
-                    asyncio.ensure_future(self._render(r))
+                if self.a.avatar:  # the face has to move with the words: the audio waits for the first video chunk
+                    if r.render is None:  # the avatar was switched on after this reply was decided
+                        r.video = False
+                        r.render = asyncio.ensure_future(self._render(r))
+                    await self._release(r)
             elif act == "drop":
                 self._cancel_pending()
                 await self.a.status("listening", dropped=why)
 
         out = None
         r = self.playing
+        if r is not None and not r.video and not self.a.avatar:
+            r.video = True  # the avatar was switched off while this reply waited for its face: just speak
         if r is not None and not r.video:
             taker = next((li for li in self.listeners.values() if li.run >= FLOOR_POLICY.interrupt_max), None)
             if taker or r.line_id != self.line_no:  # someone took the floor while the face rendered (a "mm" doesn't)
@@ -918,7 +951,8 @@ class ImprovedBrain:
                 if r.hist_idx == len(self.a.history) - 1:  # never heard: not part of the meeting
                     self.a.history.pop()
                 self.playing = None
-                await self.a.room.avatar_stop()
+                if r.vstarted:
+                    await self.a.room.avatar_stop()
                 await self.a.status("listening", dropped="someone spoke while the avatar rendered")
             r = None
         if r is not None:
@@ -926,8 +960,8 @@ class ImprovedBrain:
                 r.started = True
                 m, now = r.marks, time.perf_counter()
                 t0 = m.get("speech_end", r.t_end)
-                timing = {k: round(m[k] - t0, 2) for k in ("commit", "transcript", "decided", "draft", "created", "audio")
-                          if k in m}
+                timing = {k: round(m[k] - t0, 2) for k in ("commit", "transcript", "decided", "draft", "created", "audio",
+                                                            "render", "video") if k in m}
                 timing["play"] = round(now - t0, 2)
                 timing["speculated"] = bool(m.get("speculated"))
                 await self.a.status("speaking", after_s=round(now - r.t_end, 2), why=r.play_why, timing=timing)
@@ -952,7 +986,7 @@ class ImprovedBrain:
                 r.pos += len(a) // 2
             elif r.done:
                 self.playing = None
-                if self.a.avatar:
+                if r.vstarted:
                     await self.a.room.avatar_stop()
                 await self.a.status("listening")
         self.last_out = out if out is not None else np.zeros(N, np.int16)
@@ -961,7 +995,7 @@ class ImprovedBrain:
     async def _interrupt(self, r, li):
         r.cancel = True
         r.speaker.cancel()
-        if self.a.avatar:
+        if r.vstarted:
             await self.a.room.avatar_stop()
         heard = floor.truncate(r.text, [(a / SR, b / SR, x) for a, b, x in r.speaker.segments], r.pos / SR)
         if r.hist_idx is not None and r.hist_idx < len(self.a.history):
@@ -974,7 +1008,8 @@ class ImprovedBrain:
         await self.a.status("listening", stopped=f"{li.name} interrupted", heard=heard)
 
     async def _render(self, r):
-        """Render the whole reply through Higgs Avatar once its speech is complete, and stream it to everyone."""
+        """Render the reply through Higgs Avatar once its speech is complete. Chunks are held in r.vbuf until the
+        reply is released to the room (_release), then streamed to everyone as they come."""
         while not r.done and not r.cancel:
             await asyncio.sleep(0.05)
         if r.cancel or not spend():
@@ -982,19 +1017,38 @@ class ImprovedBrain:
             return
         pcm = np.frombuffer(bytes(r.audio[:len(r.audio) // 2 * 2]), np.int16)
         loop = asyncio.get_running_loop()
-        await self.a.room.avatar_start(avatar.MIME)
+        r.marks["render"] = time.perf_counter()
 
         def on_chunk(c):
             def deliver():
-                if not r.cancel:
-                    asyncio.ensure_future(self.a.room.send_avatar_chunk(c))
-                    r.video = True
+                if r.cancel:
+                    return
+                r.marks.setdefault("video", time.perf_counter())
+                if r.released:
+                    asyncio.ensure_future(self._send_video(r, [c]))
+                else:
+                    r.vbuf.append(c)
             loop.call_soon_threadsafe(deliver)
         try:
             await asyncio.to_thread(avatar.render, pcm, on_chunk, lambda: r.cancel)
         except Exception as e:  # noqa: BLE001  (no face this time: speak anyway)
             await self.a.room.event({"type": "ai_error", "error": f"avatar: {e!r}"[:300]})
             r.video = True
+
+    async def _send_video(self, r, chunks):
+        if not r.vstarted:
+            r.vstarted = True
+            await self.a.room.avatar_start(avatar.MIME)
+        for c in chunks:
+            await self.a.room.send_avatar_chunk(c)
+        r.video = True  # the audio may start: the face is moving on everyone's screen
+
+    async def _release(self, r):
+        """The floor opened for this reply: send the video rendered so far; the rest follows as it comes."""
+        r.released = True
+        if r.vbuf:
+            chunks, r.vbuf = r.vbuf, []
+            await self._send_video(r, chunks)
 
     async def _lab(self, t):
         if t - self.lab_t < 0.2:
