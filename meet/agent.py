@@ -181,9 +181,11 @@ def judge_rule(d, r, prompt="v4b"):
             and not any(t["speaker"] == r["target_speaker"] for t in ctx[-2:])
             and not named_ai_before(ctx, r["current_turn"]["speaker"], r["target_speaker"])):
         to = "group"  # in a group "you" is nearly always a person (AMI: "makes sense for you to take it from here")
-    if (to == "group" and d.get("ask") is True and ctx and ctx[-1]["speaker"] == r["target_speaker"]
+    if (to == "group" and ctx and (ctx[-1]["speaker"] == r["target_speaker"]
+                                   or named_ai_before(ctx, r["current_turn"]["speaker"], r["target_speaker"], 1))
+            and (d.get("ask") is True or cur.rstrip().endswith("?"))
             and len(re.findall(r"[A-Za-z']+", cur)) <= 4 and not any(p.lower() in cur.lower() for p in r["people"])):
-        to = "me"  # "why?", "how small?", "like what?" right after the AI spoke: a follow-up to it
+        to, d = "me", {**d, "ask": True}  # "why?", "anything else?" right after the AI spoke, or after "Higgs, thanks."
     if to == "group":
         return d.get("ask") is True and d.get("answered") is not True and d.get("can") is True
     if to != "me":

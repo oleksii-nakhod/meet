@@ -105,3 +105,5 @@ def test_rule_v5():
     assert not rule({"to": "group", "ask": True, "reply": True, "can": False},
                     r(["Alex", "Priya"], "Priya, why?", [("Higgs", "Open with a live call.")]))
     assert rule({"to": "group", "ask": True, "answered": False, "can": True}, r(["Alex", "Priya"], "When's the deadline?"))
+    piece = r(["Priya", "Alex"], "Anything else?", [("Higgs", "Rent is due Sunday."), ("Priya", "Higgs. Thanks.")])
+    assert rule({"to": "group", "ask": False, "reply": False}, piece)  # the same person just addressed the AI

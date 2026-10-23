@@ -172,6 +172,32 @@ SCENARIOS6 = [  # accents (cloned voice-library voices): the same scenes, other 
         ("talk_over", "Alex", LONG_Q, ("Priya", "Mm-hm."), "continue")]),
 ]
 
+SCENARIOS7 = [  # the edges of the call
+    dict(name="five_people", people=["Alex", "Priya", "Sam", "Jordan", "Mei"], steps=[
+        ("say", "Alex", "Okay, everyone's here. Mei, can you start?", "silent"),
+        ("say", "Mei", "Sure. I finished the slides last night.", "silent"),
+        ("say", "Jordan", "Nice. Sam, did you test the call on your phone?", "silent"),
+        ("say", "Sam", "Yeah, it works, but the echo was bad without headphones.", "silent"),
+        ("say", "Priya", "Higgs, when do submissions close?", "reply"),
+        ("say", "Jordan", "And how long can the video be?", "reply"),
+        ("talk_over", "Alex", "Higgs, how should we split the demo between the five of us?", ("Mei", "Mm-hm."), "continue")]),
+    dict(name="drop_and_rejoin", people=["Alex", "Priya"], steps=[
+        ("say", "Priya", "Higgs, how long can the video be?", "reply"),
+        ("leave", "Priya", 2.0),
+        ("say", "Alex", "Priya dropped. Higgs, when do submissions close?", "reply"),
+        ("rejoin", "Priya", 5.0),
+        ("say", "Priya", "Sorry, my Wi-Fi died. Higgs, what did I miss?", "reply")]),
+    dict(name="flip_mid_reply", people=["Alex", "Priya"], steps=[
+        ("flip_while_talking", "Alex", LONG_Q, {"type": "set_mode", "mode": "default"}),
+        ("say", "Priya", "Higgs, can you hear us?", "reply"),
+        ("flip_while_talking", "Priya", "Higgs, what's the riskiest part of our plan?", {"type": "set_mode", "mode": "improved"}),
+        ("say", "Alex", "Higgs, when do submissions close?", "reply"),
+        ("flip_while_talking", "Alex", "Higgs, how should we open the video?", {"type": "set_avatar", "on": True}),
+        ("say", "Priya", "Higgs, and how long can it be?", "reply"),
+        ("flip_while_talking", "Alex", "Higgs, what do the judges weigh most?", {"type": "set_avatar", "on": False}),
+        ("say", "Priya", "Higgs, thanks. Anything else?", "reply")]),
+]
+
 SCENARIOS5 = [  # the switch on the call, flipped mid-conversation
     dict(name="switch_modes", modes=("improved",), people=["Alex", "Priya"], steps=[
         ("say", "Alex", "Higgs, when do submissions close?", "reply"),
@@ -433,6 +459,37 @@ async def run_step(step, bots_, ear, mode):
         await ear.json(msg)
         await asyncio.sleep(step[2] if len(step) > 2 else 3.0)
         return None
+    if kind == "leave":  # someone drops off (closes the tab / loses the network)
+        await bots_[step[1]].leave()
+        await asyncio.sleep(step[2] if len(step) > 2 else 2.0)
+        return None
+    if kind == "rejoin":  # ... and comes back with the same tab id (the server gives them their tile back)
+        old = bots_[step[1]]
+        b = Bot(old.base, old.room, step[1])
+        b.pid, b.gain_db = old.pid, getattr(old, "gain_db", 0.0)
+        bots_[step[1]] = b
+        if old is ear:
+            raise RuntimeError("the listening bot can't leave")
+        await b.join()
+        await asyncio.sleep(step[2] if len(step) > 2 else 4.0)
+        return None
+    if kind == "flip_while_talking":  # flip a switch while Higgs is mid-reply
+        _, who, sp, msg = step
+        await wait_quiet(ear, 1.0)
+        t0 = ear.now()
+        await bots_[who].say(speech(sp, voice_of(who)))
+        on = await ear.wait_ai(10.0, since=t0)
+        if on is None:
+            row.update(said=text_of(sp), expect="reply", got="no reply to flip during", ok=None)
+            return row
+        await asyncio.sleep(1.0)
+        await ear.json(msg)
+        await asyncio.sleep(5.0)
+        row.update(said=text_of(sp) + f" + {msg}", expect="no crash", got="flipped", ok=True)
+        row.update(window_events(ear, t0, ear.now()))
+        if row.get("errors"):
+            row.update(ok=False, got="errors")
+        return row
     if kind == "join":  # someone joins mid-call
         b = Bot(ear.base, ear.room, step[1])
         bots_[step[1]] = b
@@ -530,7 +587,7 @@ def short(r):
 async def main_async(a):
     outdir = os.path.join(MEET, "out", "scen", a.tag)
     os.makedirs(outdir, exist_ok=True)
-    pool = {"1": SCENARIOS, "2": SCENARIOS2, "3": SCENARIOS3, "4": SCENARIOS4, "5": SCENARIOS5, "6": SCENARIOS6,
+    pool = {"1": SCENARIOS, "2": SCENARIOS2, "3": SCENARIOS3, "4": SCENARIOS4, "5": SCENARIOS5, "6": SCENARIOS6, "7": SCENARIOS7,
             "all": SCENARIOS + SCENARIOS2}[a.set]
     todo = [(sc, m) for sc in pool if not a.only or sc["name"] in a.only for m in a.modes
             if m in sc.get("modes", ("default", "improved"))]
@@ -585,7 +642,7 @@ def main():
     ap.add_argument("--modes", nargs="+", default=["improved", "default"])
     ap.add_argument("--only", nargs="*")
     ap.add_argument("--servers", type=int, default=0, help="servers to spread the rooms over (default: one per room)")
-    ap.add_argument("--set", default="1", choices=["1", "2", "3", "4", "5", "6", "all"])
+    ap.add_argument("--set", default="1", choices=["1", "2", "3", "4", "5", "6", "7", "all"])
     ap.add_argument("--par", type=int, default=4)
     ap.add_argument("--port", type=int, default=8641)
     ap.add_argument("--samples", type=int, default=0, help="judge samples per line (0: the agent's default)")
