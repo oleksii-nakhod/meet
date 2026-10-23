@@ -488,7 +488,7 @@ async def main_async(a):
                     if isinstance(p, str):
                         texts.add((p, VOICES[who]))
     await asyncio.gather(*[asyncio.to_thread(clip, t, v) for t, v in texts])
-    servers = [start_server(a.port + i, {"MEET_SAMPLES": str(a.samples)}) for i in range(a.par)]
+    servers = [start_server(a.port + i, {"MEET_SAMPLES": str(a.samples)} if a.samples else {}) for i in range(a.par)]
     q = asyncio.Queue()
     for item in todo:
         q.put_nowait(item)
@@ -525,7 +525,7 @@ def main():
     ap.add_argument("--set", default="1", choices=["1", "2", "3", "4", "all"])
     ap.add_argument("--par", type=int, default=4)
     ap.add_argument("--port", type=int, default=8641)
-    ap.add_argument("--samples", type=int, default=3)
+    ap.add_argument("--samples", type=int, default=0, help="judge samples per line (0: the agent's default)")
     ap.add_argument("--tag", default=time.strftime("%m%d_%H%M"))
     asyncio.run(main_async(ap.parse_args()))
 

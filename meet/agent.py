@@ -35,7 +35,15 @@ import floor  # noqa: E402
 import tv_eval  # noqa: E402
 
 VOICE = os.environ.get("MEET_VOICE", "chloe")      # the same preset voice in both modes, so the voice doesn't tell
-SAMPLES = int(os.environ.get("MEET_SAMPLES", "3"))  # judge/fact-check samples per line (1 for cheap test runs)
+# Judge/fact-check samples per line. Default: 1 in a one-to-one call, 3 with more people. On Third Voice's group test
+# set 1 sample speaks up wrongly more often (balanced 0.906 vs 0.928, silent 0.924 vs 0.967); on the one-to-one and
+# held-out cases (tests/judge_cases.py) 1 and 3 do the same. Each sample is a standing Higgs session, and Higgs caps
+# concurrent sessions per API key (close 1013 "Max concurrency exceeded").
+SAMPLES = int(os.environ["MEET_SAMPLES"]) if os.environ.get("MEET_SAMPLES") else None
+
+
+def samples_for(n_people):
+    return SAMPLES or (1 if n_people <= 1 else 3)
 BUDGET = int(os.environ.get("MEET_BUDGET", "30000"))  # requests per server run (~10 per judged line in improved mode)
 LANG = os.environ.get("MEET_LANG", "en")           # transcription language hint ("" = auto: "mm" came back as "嗯")
 SPECULATE = os.environ.get("MEET_SPECULATE", "1") == "1"  # voice likely replies while the judge decides
@@ -172,7 +180,7 @@ def judge_rule(d, r, prompt="v4b"):
     return d.get("ask") is True or d.get("reply") is True
 
 
-async def decide(r, ask, samples=SAMPLES, prompt="v4b"):
+async def decide(r, ask, samples=3, prompt="v4b"):
     """Should the AI speak after r's current turn? ask(kind, system, user, i) -> Higgs's text, kind "judge"/"check".
     Majority of the judge votes that came back (a failed request is an abstention, not a "no": under load Higgs fails
     a few percent of requests with upstream_error), OR all fact-checks that came back (at least a majority of them) say
@@ -329,22 +337,27 @@ def to16(pcm):
 
 
 class Pool:
-    """Pre-opened Realtime text sessions with fixed instructions, one request each, replaced in the background
-    (third_voice/live_demo.py), plus a close() for when the roster (part of the instructions) changes."""
+    """Pre-opened Realtime text sessions with fixed instructions (third_voice/live_demo.py), plus a close() for when the
+    roster (part of the instructions) changes. A session answers one request, then its two items (the request and
+    the answer) are deleted and, once Higgs confirms both deletions, it goes back to the pool for the next one: the
+    conversation stays empty, so no request sees another's (checked: a deleted "my name is ..." is forgotten). Before,
+    every judged line opened and closed ~9 sessions."""
 
     MAX_AGE = 240.0  # Higgs closes a session after 5 min without user activity (session.idle_timeout)
 
     def __init__(self, instructions, size):
-        self.instructions, self.q, self.closed = instructions, asyncio.Queue(), False
+        self.instructions, self.q, self.closed, self.size = instructions, asyncio.Queue(), False, size
+        self.opens = 0
         for _ in range(size):
             self._refill()
 
     def _new(self):
+        self.opens += 1
         return Session({"instructions": self.instructions, "output_modalities": ["text"]})
 
     def _refill(self):
         async def open_one():
-            for k in range(8):  # an open can fail under load (upstream errors, rate limits): keep trying
+            for k in range(8):  # an open can fail under load (upstream errors, rate limits, 1013): keep trying
                 if self.closed:
                     return
                 s = self._new()
@@ -354,12 +367,15 @@ class Pool:
                     await asyncio.sleep(min(10.0, 1.0 + 2 * k))
                     continue
                 s.opened_at = time.perf_counter()
-                if self.closed:
-                    await close(s)
-                else:
-                    await self.q.put(s)
+                await self._put(s)
                 return
         asyncio.ensure_future(open_one())
+
+    async def _put(self, s):
+        if self.closed or self.q.qsize() >= self.size:
+            await close(s)
+        else:
+            await self.q.put(s)
 
     async def _take(self):
         """A live pre-opened session, or a freshly opened one if none is ready within a few seconds."""
@@ -369,11 +385,30 @@ class Pool:
             except asyncio.TimeoutError:
                 s = self._new()
                 await asyncio.wait_for(s.__aenter__(), 20)
+                s.opened_at = time.perf_counter()
                 return s
-            self._refill()
             if s.close_code is None and time.perf_counter() - s.opened_at < self.MAX_AGE:
                 return s
-            asyncio.ensure_future(close(s))  # idle-closed or about to be: take the next one
+            asyncio.ensure_future(close(s))  # idle-closed or about to be: replace it, take the next one
+            self._refill()
+
+    async def _recycle(self, s, since):
+        """Delete what this request added and put the session back; close it if Higgs doesn't confirm in 3 s."""
+        try:
+            ids = list(dict.fromkeys(e["item"]["id"] for t, e in s.events if t >= since and e.get("type") ==
+                                     "conversation.item.added" and (e.get("item") or {}).get("id")))
+            for i in ids:
+                await s.send({"type": "conversation.item.delete", "item_id": i})
+            for i in ids:
+                await s.wait(lambda e, i=i: e.get("type") == "conversation.item.deleted" and e.get("item_id") == i,
+                             timeout=3, since=since)
+            if ids and s.close_code is None and time.perf_counter() - s.opened_at < self.MAX_AGE:
+                await self._put(s)
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        await close(s)
+        self._refill()
 
     async def ask(self, user, retries=0, on_delta=None):
         """Higgs's text answer to `user`, "" if it failed (`retries` more attempts on a failure or empty answer).
@@ -381,7 +416,7 @@ class Pool:
         for attempt in range(retries + 1):
             if not spend():
                 return ""
-            s = None
+            s, ok = None, False
             stream = on_delta if attempt == 0 else None
 
             def done(ev):
@@ -393,6 +428,7 @@ class Pool:
                 since = s.now()
                 await s.say_text(user)
                 _, ev = await s.wait(done, timeout=30, since=since)
+                ok = ev["response"].get("status") in (None, "completed")
                 text = s.transcript(ev["response"]["id"]).strip()
                 if text:
                     return text
@@ -400,7 +436,11 @@ class Pool:
                 pass
             finally:
                 if s is not None:
-                    asyncio.ensure_future(close(s))
+                    if ok:
+                        asyncio.ensure_future(self._recycle(s, since))
+                    else:  # a failed or timed-out response: don't reuse that session
+                        asyncio.ensure_future(close(s))
+                        self._refill()
         return ""
 
     async def close(self):
@@ -635,6 +675,7 @@ class ImprovedBrain:
         self.a, self.policy = agent, Policy()
         self.listeners = {}
         self.pools = None
+        self.samples = 3
         self.take = floor.TakeFloor(FLOOR_POLICY)
         self.t = 0.0
         self.line_no = 0          # id of the newest committed line
@@ -655,8 +696,9 @@ class ImprovedBrain:
 
     async def _rebuild_pools(self):
         old, p = self.pools, self.point()
-        self.pools = {"judge": Pool(judge_prompt(p, PROMPT)[0], SAMPLES),
-                      "check": Pool(tv_eval.fact_prompt(p)[0], SAMPLES),
+        n = self.samples = samples_for(len(p["people"]))
+        self.pools = {"judge": Pool(judge_prompt(p, PROMPT)[0], n),
+                      "check": Pool(tv_eval.fact_prompt(p)[0], n),
                       "write": Pool(WRITER.format(ai=p["target_speaker"], setting=p["setting"],
                                                   people=", ".join(p["people"]) or "the group",
                                                   facts=" ".join(p["facts"])), 2),
@@ -675,6 +717,9 @@ class ImprovedBrain:
         return False  # each listener and pool reconnects on its own
 
     async def stop(self):
+        if self.pools:
+            await self.a.room.event({"type": "pool_stats", "opens": {k: p.opens for k, p in self.pools.items()},
+                                     "lines": self.line_no})
         for li in list(self.listeners.values()):
             await li.stop()
         self.listeners.clear()
@@ -745,7 +790,7 @@ class ImprovedBrain:
         draft = asyncio.ensure_future(writer.ask(convo, retries=1, on_delta=spec.feed if spec else None))
         # both drafts start with the decision, so a correction costs no extra wait (rewriting it after: ~1 s)
         cdraft = asyncio.ensure_future(pools["write"].ask(CORRECT.format(ai=a.ai) + convo, retries=1)) if a.facts else None
-        speak, d = await decide(r, lambda kind, _sys, user, _i: pools[kind].ask(user), prompt=PROMPT)
+        speak, d = await decide(r, lambda kind, _sys, user, _i: pools[kind].ask(user), samples=self.samples, prompt=PROMPT)
         why = d["reading"]
         t_decided = time.perf_counter()
         await a.line(li.slot, li.name, text, {"speak": speak, "why": d["why"], "reading": why, "votes": d["votes"],

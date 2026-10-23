@@ -143,7 +143,7 @@ async def main_async(a):
         if kind:  # skipped or a backchannel: the live agent doesn't judge it
             return c, False, {"reading": {"prefilter": kind}}
         r = point(people, ctx, (line[0], text), HACK)
-        speak, why = await agent.decide(r, lambda _k, s, u, i: ask(s, u, i), samples=3, prompt=a.prompt)
+        speak, why = await agent.decide(r, lambda _k, s, u, i: ask(s, u, i), samples=a.samples, prompt=a.prompt)
         return c, speak, why
 
     res = await asyncio.gather(*[one(c) for c in cases])
@@ -162,9 +162,10 @@ async def main_async(a):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--prompt", default="v4b")
+    ap.add_argument("--prompt", default="v5")
     ap.add_argument("--only")
     ap.add_argument("--fresh", action="store_true")
+    ap.add_argument("--samples", type=int, default=3)
     ap.add_argument("--file", help="cases from a jsonl file in tests/ (judge_heldout.jsonl)")
     ap.add_argument("-v", "--verbose", action="store_true")
     asyncio.run(main_async(ap.parse_args()))

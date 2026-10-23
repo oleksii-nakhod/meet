@@ -64,7 +64,7 @@ async def main_async(a):
         if kind and prompt != "v4b":  # the live agent's pre-filters (added with v5)
             return False, {"reading": {"prefilter": kind}}
         r2 = {**r, "current_turn": {**r["current_turn"], "text": text}}
-        return await agent.decide(r2, lambda _k, s, u, i: ask(s, u, i), samples=3, prompt=prompt)
+        return await agent.decide(r2, lambda _k, s, u, i: ask(s, u, i), samples=a.samples, prompt=prompt)
 
     preds = []
     for prompt in a.prompts:
@@ -93,6 +93,7 @@ def main():
     ap.add_argument("--set", default="test")
     ap.add_argument("--prompts", nargs="+", default=["v4b", "v5"])
     ap.add_argument("--par", type=int, default=10)
+    ap.add_argument("--samples", type=int, default=3)
     ap.add_argument("-v", "--verbose", action="store_true")
     asyncio.run(main_async(ap.parse_args()))
 
