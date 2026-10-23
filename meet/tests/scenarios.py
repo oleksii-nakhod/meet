@@ -110,6 +110,13 @@ SCENARIOS2 = [
     dict(name="soft_bc", people=["Alex", "Priya"], steps=[
         ("talk_over", "Alex", LONG_Q, ("Priya", {"ami": "bc_02.wav", "gain_db": -10}), "continue"),
         ("talk_over", "Priya", "Higgs, what's the riskiest part of our plan?", ("Alex", {"ami": "bc_06.wav", "gain_db": -10}), "continue")]),
+    dict(name="quiet_mic", people=["Alex", "Priya"], gain={"Alex": -18.0}, steps=[
+        ("say", "Alex", "Higgs, can you hear me? My mic is really quiet.", "reply"),
+        ("say", "Alex", "Higgs, when do submissions close?", "reply"),
+        ("say", "Priya", "Alex, I can barely hear you.", "silent")]),
+    dict(name="very_quiet_mic", people=["Alex"], gain={"Alex": -26.0}, steps=[
+        ("say", "Alex", "Higgs, are you there?", "reply"),
+        ("say", "Alex", "How long can the video be?", "reply")]),
     dict(name="rapid_chat", people=["Alex", "Priya", "Sam"], steps=[
         ("say", "Alex", "Did anyone eat yet?", "silent", {"gap": 0.3}),
         ("say", "Priya", "Not yet, I'm starving.", "silent", {"gap": 0.3}),
@@ -300,6 +307,8 @@ async def run_step(step, bots_, ear, mode):
             await asyncio.sleep(0.3)
         b = bots_[who]
         pcm = speech(sp, VOICES[who])
+        if getattr(b, "gain_db", 0.0):  # a quiet (or hot) microphone
+            pcm = np.clip(pcm.astype(np.float32) * 10 ** (b.gain_db / 20), -32768, 32767).astype(np.int16)
         t_start = b.now()
         t_end = await b.say(pcm)
         if "then_cue" in opts:  # someone makes a short sound while the reply is being prepared
@@ -424,7 +433,8 @@ async def run_scenario(base, sc, mode, outdir):
                       facts=sc.get("facts", HACK))
     bs = {p: Bot(base, rid, p, echo=sc.get("echo", {}).get(p, 0.0), noise_db=sc.get("noise", {}).get(p, -70.0))
           for p in people}
-    for b in bs.values():
+    for p, b in bs.items():
+        b.gain_db = sc.get("gain", {}).get(p, 0.0)
         await b.join()
         await asyncio.sleep(0.2)
     ear = bs[people[0]]  # what one participant hears

@@ -62,6 +62,15 @@ def test_vocative_only():
     assert not agent.vocative_only("Hey there.", "Higgs")
 
 
+def test_vocative_person():
+    vp = agent.vocative_person
+    assert vp("Alex, I can barely hear you.", ["Alex", "Sam"], "Higgs") == "Alex"
+    assert vp("Hey Sam, can you check it?", ["Alex", "Sam"], "Higgs") == "Sam"
+    assert vp("Can you check it, Sam?", ["Alex", "Sam"], "Higgs") == "Sam"
+    assert vp("Alex, ask Higgs about it.", ["Alex"], "Higgs") is None  # the AI is named too
+    assert vp("Alexander the Great was fast.", ["Alex"], "Higgs") is None
+
+
 def test_facts_relevant():
     facts = ["Submissions close Saturday at 3 pm.", "The project is a video call where Higgs joins."]
     assert agent.facts_relevant("When do submissions close?", [], facts, ["Higgs", "Alex"])

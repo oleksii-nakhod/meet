@@ -172,6 +172,9 @@ def judge_rule(d, r, prompt="v4b"):
     if to == r["target_speaker"].lower():
         to = "me"
     ctx, cur = r["context_turns"], r["current_turn"]["text"]
+    who = vocative_person(cur, [p for p in r["people"] if p != r["current_turn"]["speaker"]], r["target_speaker"])
+    if who:
+        to = "person"  # "Alex, I can barely hear you.": said to Alex, however the judge read it
     if (to == "me" and len(r["people"]) > 1 and r["target_speaker"].lower() not in cur.lower()
             and not any(t["speaker"] == r["target_speaker"] for t in ctx[-2:])):
         to = "group"  # in a group "you" is nearly always a person (AMI: "makes sense for you to take it from here")
@@ -214,6 +217,9 @@ async def decide(r, ask, samples=3, prompt="v4b"):
     checks = [p for p in map(got, ft) if isinstance(p, dict)]
     facts_hit = [bool(p.get("contradicts")) for p in checks]
     wrong = len(facts_hit) >= need and all(facts_hit)
+    if wrong and FACT_GUARD and not FACTY.search(r["current_turn"]["text"]) and not any(
+            p.get("wrong") is True for p in map(got, jt) if isinstance(p, dict)):
+        wrong = False  # the fact-check reacting to an earlier wrong claim, not to this line ("I'll just check it.")
     speak = early or (bool(parsed) and sum(judge_rule(p, r, prompt) for p in parsed) * 2 > len(parsed)) or wrong
     reading = dict(parsed[0] if parsed else {})
     if wrong:
@@ -311,6 +317,7 @@ VOLUNTEERS = re.compile(r"\bI(?:'ll| will| can| could)\s+(?:handle|take care of|
 STOP_ASK = re.compile(r"^(?:(?:ok(?:ay)?|hey|um|uh)[,.]?\s+)?(?:stop(?: talking)?|wait|hold on|hang on|shh+|quiet|be quiet|"
                       r"enough|one (?:sec|second|moment))[.!]*$", re.I)
 WRITER = REPLY_SYS2
+FACT_GUARD = os.environ.get("MEET_FACT_GUARD", "0") == "1"
 HEDGE_S = 0.5
 
 
@@ -354,6 +361,19 @@ def first_sentence(text, complete_only=False):
 
 
 VOCATIVE_WAIT = 0.9  # silence after a line that only calls the AI before answering it
+
+
+def vocative_person(text, people, ai):
+    """The person a line is addressed to by name, as its first word(s) or after a final comma ("Alex, can you...",
+    "Hey Priya, ...", "..., Sam?"), unless the AI is named too. None if no one is."""
+    if re.search(rf"\b{re.escape(ai)}\b", text, re.I):
+        return None
+    for p in people:
+        n = re.escape(p)
+        if (re.match(rf"^\s*(?:(?:hey|hi|ok|okay|so|and|um|uh|oh|well)[,]?\s+)?{n}\b\s*[,.!?]", text, re.I)
+                or re.search(rf",\s*{n}\s*[.?!]*\s*$", text, re.I)):
+            return p
+    return None
 
 
 def vocative_only(text, ai):
@@ -1030,7 +1050,7 @@ class ImprovedBrain:
                                           self.moved_on(r))
             holder = next((x for x in self.listeners.values() if x is not li and x.gate.silence < FLOOR_POLICY.max_wait
                            and (x.p_now is None or x.p_now >= FLOOR_POLICY.th_play)), None)
-            if act == "play" and holder is not None:
+            if act == "play" and holder is not None and not r.addressed:  # asked by name: a 0.35 s gap will do
                 act, why = "wait", f"{holder.name} may go on"  # someone else just spoke and still holds the floor
             # someone else spoke after this line and what they said isn't judged yet (it may answer it: "Saturday at
             # three"): wait for that verdict; a substantive line then makes this reply stale, a "mm-hm" doesn't

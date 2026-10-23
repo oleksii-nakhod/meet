@@ -142,13 +142,12 @@ async def run(a):
            "skipped": [e for e in log if e.get("type") == "reply_skipped"],
            "dropped": [e.get("dropped") for e in log if e.get("type") == "ai_state" and e.get("dropped")],
            "errors": [e.get("error") for e in log if e.get("type") == "ai_error"][:10], "asks": plan}
-    t_created = log[0]["t"]
     for p in plan:
         lines_q = [x for x in lines if x.get("name") == "Eve" and x["t"] > 0]
         p["heard"] = next((x["text"] for x in lines_q if x["text"][:15].lower() in p["q"].lower() or
                            p["q"][:15].lower() in x["text"].lower()), None)
-        said = next((x for x in says if x["t"] > t_created and p["heard"] and
-                     x["t"] >= next((y["t"] for y in lines_q if y["text"] == p["heard"]), 1e18)), None)
+        t_line = next((y["t"] for y in lines_q if y["text"] == p["heard"]), None)
+        said = next((x for x in says if t_line and t_line <= x["t"] <= t_line + 8.0), None)
         p["ai"] = said["text"] if said else None
         p["right"] = bool(said) and any(w in said["text"].lower() for w in p["want"])
     path = os.path.join(MEET, "out", f"ami_meeting_{a.meeting}_{a.start}_{a.mode}.json")
