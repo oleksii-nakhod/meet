@@ -174,8 +174,9 @@ class BargeIn:
             self.last_heard = now
         return self._out(event, why, dur)
 
-    def update(self, t, speaking, p_bc, words_so_far=None, p_now=None):
-        """p_bc: backchannel *detector* (the engine's `p_bcdet`). p_now: VAP for this person, if available; without it
+    def update(self, t, speaking, p_bc, words_so_far=None, p_now=None, bc_lag=0.0):
+        """p_bc: backchannel *detector* (the engine's `p_bcdet`). bc_lag: seconds of audio the detector hasn't seen yet.
+        p_now: VAP for this person, if available; without it
         only `interrupt_max` and the fragment rule can interrupt. words_so_far (streaming STT, if any): 3+ words is
         more than a backchannel, so it stands in for VAP agreeing once `interrupt_after` has passed."""
         p, now, dt = self.p, t, _dt(self.t, t)
@@ -200,6 +201,9 @@ class BargeIn:
         self.bc_max = max(self.bc_max, p_bc or 0.0)
         dur = round(now - self.onset, 6)
         patience = p.interrupt_after + (0.25 if now - self.last_heard < 1.0 else 0.0)
+        # a backchannel detector running behind real time (a busy machine) hasn't heard the sound yet: give it that long
+        # (a loaded run stopped Higgs for a 0.55 s "Mm-hm." that passed twice on an idle machine); interrupt_max caps it
+        patience += min(max(0.0, bc_lag), 0.4)
         floor = (p_now is not None and p_now > p.floor_p) or (words_so_far is not None and words_so_far >= 3)
         if self.bc_max >= p.bc_threshold and dur < 1.0:
             if not speaking:  # the backchannel is over: carry on at full volume, forget it

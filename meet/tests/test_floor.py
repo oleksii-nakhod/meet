@@ -164,3 +164,18 @@ def test_truncate_cuts_at_the_right_sentence():
     assert truncate(TEXT, SEGS, 3.3) == "First point. Second point. —"  # 65 % of it heard
     assert truncate(TEXT, SEGS, 0.5) == "—"
     assert truncate(TEXT, SEGS, 9.0) == TEXT + " —"
+
+
+def test_lagging_detector_gets_more_patience():
+    # a 0.55 s "mm-hm" with VAP saying "taking the floor": with an up-to-date detector that is late with its
+    # verdict (p_bc 0.1), it's an interruption at interrupt_after; if the detector is 0.3 s behind, wait for it
+    b = BargeIn()
+    ev = events(run(b, [(0.55, True, 0.1), (0.4, False, 0.1)], p_now=0.8))
+    assert [e for _, e in ev] == ["interrupt"]
+    b = BargeIn()
+    tr = run(b, [(0.5, True, 0.1), (0.05, True, 0.9), (0.4, False, 0.9)], p_now=0.8, bc_lag=0.3)
+    assert [e for _, e in events(tr)] == ["backchannel"]
+    # but a real interruption still stops Higgs by interrupt_max, however far behind the detector is
+    b = BargeIn()
+    ev = events(run(b, [(1.2, True, 0.1)], p_now=0.8, bc_lag=2.0))
+    assert [e for _, e in ev] == ["interrupt"] and ev[0][0] <= P.interrupt_max + 1e-6

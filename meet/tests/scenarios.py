@@ -156,6 +156,22 @@ SCENARIOS4 = [  # long: past Higgs's 5-minute idle timeout (session.idle_timeout
         ("say", "Alex", "Higgs, and what are the judging criteria?", "reply")]),
 ]
 
+ELLA = "voice_aca024debbb9ce3f32a478cfd4ba594cac716ec2f4b8479730e7584f9a15dae7"  # voice library: Indian English
+MAYA = "voice_35bb36e156fdc13c7de4358d9d16dfc9c8a9b70d9ac81fec03a3ffed8f78b445"  # voice library: Canadian
+SCENARIOS6 = [  # accents (cloned voice-library voices): the same scenes, other speakers
+    dict(name="accent_1to1", people=["Alex"], voices={"Alex": ELLA}, steps=[
+        ("say", "Alex", "Hey, Higgs.", "reply"),
+        ("say", "Alex", "When do submissions close?", "reply"),
+        ("say", "Alex", "Anything else I should know?", "reply"),
+        ("say", "Alex", "Um.", "silent")]),
+    dict(name="accent_group", people=["Alex", "Priya"], voices={"Alex": ELLA, "Priya": MAYA}, steps=[
+        ("say", "Alex", "Priya, did you push the new layout?", "silent"),
+        ("say", "Priya", "Yeah, I pushed it this morning.", "silent"),
+        ("say", "Alex", "Higgs, how much is the user experience worth in judging?", "reply"),
+        ("say", "Priya", "So submissions close Sunday at noon, right?", "reply"),
+        ("talk_over", "Alex", LONG_Q, ("Priya", "Mm-hm."), "continue")]),
+]
+
 SCENARIOS5 = [  # the switch on the call, flipped mid-conversation
     dict(name="switch_modes", modes=("improved",), people=["Alex", "Priya"], steps=[
         ("say", "Alex", "Higgs, when do submissions close?", "reply"),
@@ -292,6 +308,13 @@ async def wait_quiet(b, quiet=0.8, timeout=25):
     await b.wait_ai_quiet(quiet, timeout)
 
 
+VOICE_OVERRIDE = {}  # set per scenario (sc["voices"]): accents from the voice library
+
+
+def voice_of(who):
+    return VOICE_OVERRIDE.get(who) or VOICES[who]
+
+
 async def run_step(step, bots_, ear, mode):
     kind = step[0]
     row = {"kind": kind}
@@ -307,7 +330,7 @@ async def run_step(step, bots_, ear, mode):
             await wait_quiet(ear, 1.0)
             await asyncio.sleep(0.3)
         b = bots_[who]
-        pcm = speech(sp, VOICES[who])
+        pcm = speech(sp, voice_of(who))
         if getattr(b, "gain_db", 0.0):  # a quiet (or hot) microphone
             pcm = np.clip(pcm.astype(np.float32) * 10 ** (b.gain_db / 20), -32768, 32767).astype(np.int16)
         t_start = b.now()
@@ -315,7 +338,7 @@ async def run_step(step, bots_, ear, mode):
         if "then_cue" in opts:  # someone makes a short sound while the reply is being prepared
             w2, sp2, delay = opts["then_cue"]
             await asyncio.sleep(delay)
-            bots_[w2].say(speech(sp2, VOICES[w2]))
+            bots_[w2].say(speech(sp2, voice_of(w2)))
         win = opts.get("window", 9.0 if expect == "reply" else 5.0)
         on = ear.ai_onsets(t_start)
         if not on and expect != "silent":
@@ -364,7 +387,7 @@ async def run_step(step, bots_, ear, mode):
         await wait_quiet(ear, 1.0)
         await asyncio.sleep(0.3)
         b, b2 = bots_[who], bots_[who2]
-        pcm, pcm2 = speech(sp, VOICES[who]), speech(sp2, VOICES[who2])
+        pcm, pcm2 = speech(sp, voice_of(who)), speech(sp2, voice_of(who2))
         t_start = b.now()
         t_end = await b.say(pcm)
         on = await ear.wait_ai(10.0, since=t_start)
@@ -430,6 +453,8 @@ async def run_step(step, bots_, ear, mode):
 
 async def run_scenario(base, sc, mode, outdir):
     people = sc["people"]
+    VOICE_OVERRIDE.clear()
+    VOICE_OVERRIDE.update(sc.get("voices", {}))
     rid = create_room(base, ADMIN, title=sc["name"], ai=sc.get("ai", "Higgs"), setting=sc.get("setting", SET),
                       facts=sc.get("facts", HACK))
     bs = {p: Bot(base, rid, p, echo=sc.get("echo", {}).get(p, 0.0), noise_db=sc.get("noise", {}).get(p, -70.0))
@@ -501,7 +526,7 @@ def short(r):
 async def main_async(a):
     outdir = os.path.join(MEET, "out", "scen", a.tag)
     os.makedirs(outdir, exist_ok=True)
-    pool = {"1": SCENARIOS, "2": SCENARIOS2, "3": SCENARIOS3, "4": SCENARIOS4, "5": SCENARIOS5,
+    pool = {"1": SCENARIOS, "2": SCENARIOS2, "3": SCENARIOS3, "4": SCENARIOS4, "5": SCENARIOS5, "6": SCENARIOS6,
             "all": SCENARIOS + SCENARIOS2}[a.set]
     todo = [(sc, m) for sc in pool if not a.only or sc["name"] in a.only for m in a.modes
             if m in sc.get("modes", ("default", "improved"))]
@@ -517,7 +542,7 @@ async def main_async(a):
             for who, sp in specs:
                 for p in (sp if isinstance(sp, list) else [sp]):
                     if isinstance(p, str):
-                        texts.add((p, VOICES[who]))
+                        texts.add((p, sc.get("voices", {}).get(who) or VOICES[who]))
     await asyncio.gather(*[asyncio.to_thread(clip, t, v) for t, v in texts])
     servers = [start_server(a.port + i, {"MEET_SAMPLES": str(a.samples)} if a.samples else {})
                for i in range(a.servers or a.par)]
@@ -556,7 +581,7 @@ def main():
     ap.add_argument("--modes", nargs="+", default=["improved", "default"])
     ap.add_argument("--only", nargs="*")
     ap.add_argument("--servers", type=int, default=0, help="servers to spread the rooms over (default: one per room)")
-    ap.add_argument("--set", default="1", choices=["1", "2", "3", "4", "5", "all"])
+    ap.add_argument("--set", default="1", choices=["1", "2", "3", "4", "5", "6", "all"])
     ap.add_argument("--par", type=int, default=4)
     ap.add_argument("--port", type=int, default=8641)
     ap.add_argument("--samples", type=int, default=0, help="judge samples per line (0: the agent's default)")

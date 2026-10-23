@@ -1186,7 +1186,8 @@ class ImprovedBrain:
                 await self.a.room.event({"type": "ai_say", "text": r.text})
             gains = []
             for li in self.listeners.values():
-                res = li.barge.update(t, li.speaking, li.p_bc, p_now=li.p_now)  # p_bc is the detector's p_bcdet
+                lag = li.signals.model_lag("p_bcdet") * TICK if li.signals is not None and li.signals.ready.is_set() else 0.0
+                res = li.barge.update(t, li.speaking, li.p_bc, p_now=li.p_now, bc_lag=lag)  # p_bc: the detector's p_bcdet
                 gains.append(res["gain"])
                 if res["event"] == "interrupt":
                     await self._interrupt(r, li)

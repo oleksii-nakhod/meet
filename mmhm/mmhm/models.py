@@ -62,6 +62,7 @@ class Signals:
 
     def __init__(self, vap=True, bcdet=True, bc=True):
         self.latest = {}
+        self.done = {}           # 20 ms frames each model has seen (a model behind real time lags its "latest")
         self._qs = []
         for name, make in (("p_now", lambda: _Stream("vap", 20, key="p_now")),
                            ("p_bcdet", lambda: _Stream("bc_det", 12.5, model_type="normal-ver2", key="p_bc_det")),
@@ -70,6 +71,7 @@ class Signals:
                 q = queue.Queue()
                 self._qs.append(q)
                 self.latest[name] = 0.0
+                self.done[name] = 0
                 threading.Thread(target=self._run, args=(name, make(), q), daemon=True).start()
 
     def _run(self, name, stream, q):
@@ -84,6 +86,7 @@ class Signals:
                     return
                 u.append(nxt[0]); s.append(nxt[1])
             self.latest[name] = stream.push(np.concatenate(u), np.concatenate(s))
+            self.done[name] += len(u)
             if name == "p_now":
                 self.latest["p_future"] = stream.all.get("p_future", 0.0)
 
@@ -118,6 +121,8 @@ def _signals_worker(flags, q, shared, ready, parent):
             if k in out:
                 shared[i] = out[k]
         shared[4] += 1  # frames handed to the models: the parent's pushes minus this = how far behind we are
+        shared[5] = sig.done.get("p_bcdet", shared[4])  # frames the backchannel detector has actually seen
+        shared[6] = sig.done.get("p_now", shared[4])
     sig.close()
 
 
@@ -134,7 +139,7 @@ class ProcSignals:
         ctx = mp.get_context("spawn")
         self.flags = {"vap": vap, "bcdet": bcdet, "bc": bc}
         self.q = ctx.Queue()
-        self.shared = ctx.Array("d", 5, lock=False)
+        self.shared = ctx.Array("d", 7, lock=False)
         self.pushed = 0
         self.ready = ctx.Event()
         self.proc = ctx.Process(target=_signals_worker, args=(self.flags, self.q, self.shared, self.ready, os.getpid()),
@@ -146,6 +151,10 @@ class ProcSignals:
     def lag(self):
         """Frames pushed but not yet handed to the models (each model thread may add one hop on top)."""
         return int(self.pushed - self.shared[4])
+
+    def model_lag(self, name="p_bcdet"):
+        """Frames pushed that this model hasn't seen yet: its latest value is about audio this much older."""
+        return int(self.pushed - self.shared[{"p_bcdet": 5, "p_now": 6}[name]])
 
     def push(self, u16, s16):
         self.pushed += 1
