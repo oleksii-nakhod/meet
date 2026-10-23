@@ -657,7 +657,8 @@ class Listener:
         self.vad, self.p = VAD(), brain.policy
         self.gate, self.barge = floor.LineGate(LINE_POLICY), floor.BargeIn(self.p)
         self.speaking, self.p_now, self.p_bc = False, None, None
-        self.preroll, self.streaming, self.sent = deque(maxlen=10), False, 0
+        # 300 ms of audio before speech is detected goes to STT too (200 ms: "Sam, can you..." came back as "Can you...")
+        self.preroll, self.streaming, self.sent = deque(maxlen=15), False, 0
         self.merge = False       # they resumed right after a commit: join the next piece to the last line
         self.signals = None
         self.db, self.echo_frames = -90.0, 0
