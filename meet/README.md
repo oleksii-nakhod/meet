@@ -66,8 +66,10 @@ twenty-five…". Improved misses: what "E24" means (a question only the fact she
     python tests/meeting_run.py --mode improved [--avatar] [--switch-at 90]   # real Higgs calls (~300 per run)
     python -m pytest tests/test_floor.py                # timing logic, no API
 
-(This table is from 2026-10-22. Rerun 2026-10-23 with everything below: improved 4/6, 25/26, all 32 lines heard,
-replies 1.1–2.7 s; the one extra "speak" was a garbled "Wren-five." and was dropped unheard.)
+(This table is from 2026-10-22. Rerun 2026-10-23 with everything below: improved 5/6, 25/26, all 32 lines heard,
+replies 1.1–2.7 s, all five things it said right (both amounts, what E24 means, the lease section, the rent date); the
+extra "speak" was a garbled "Wren-five." and was dropped unheard. Default the same morning: spoke 24 times, cut off
+by people 36 times.)
 
 ### Interactive scenarios (2026-10-23, `tests/scenarios.py`)
 
