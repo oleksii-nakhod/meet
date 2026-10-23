@@ -1,0 +1,20 @@
+# secrets
+.env
+*.env
+# generated outputs (recordings, logs, model adapters, game data): keep out of the public repo
+**/out/
+**/results/
+**/__pycache__/
+# large media (regenerate with make_clips.py); the listening-test clips are small enough to ship if wanted
+read_my_lips/out/
+**/certs/
+demo_clips/_rough_cut_parts/
+# regenerable test media and demo renders (kept on disk, not in git)
+meet/tests/tracks/
+**/video_tmp/
+demo_clips/*.mp4
+demo_clips/*.wav
+demo_clips/*.mp3
+mmhm/tests/*.wav
+osmosis/*.wav
+third_voice/testset/points_*.jsonl

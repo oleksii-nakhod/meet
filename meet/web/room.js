@@ -1,0 +1,427 @@
+// Meet room page. Two sockets: /ws/room (control JSON + 20 ms audio frames, 1 byte slot + Int16 PCM at 24 kHz)
+// and /ws/video (camera JPEGs, 1 byte slot + JPEG; slot 0 = the AI's avatar as fMP4 chunks for a MediaSource).
+// Slot 0 is the AI, 1..5 are people. window.meet holds counters for tests.
+const $ = (id) => document.getElementById(id);
+const RID = decodeURIComponent(location.pathname.split("/").pop());
+const QS = new URLSearchParams(location.search);
+const LAB = QS.has("lab");
+const MODE_LABEL = { default: "default Higgs", improved: "Mm-hm + Third Voice" };
+const W = (window.meet = { audioRx: {}, videoRx: {}, msgs: {}, errors: [], audioTx: 0, videoTx: 0, videoSkip: 0,
+  peak: [], roster: null, slot: null, ai: { mode: "default", avatar: false, status: "listening" }, levels: [], gain0: 1,
+  avatar: { starts: 0, chunks: 0, played: 0 } });
+const store = (s, k, v) => { try { if (v === undefined) return s.getItem(k); s.setItem(k, v); } catch { return null; } };
+const wsUrl = (p) => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${p}`;
+const bump = (o, k) => (o[k] = (o[k] || 0) + 1);
+window.addEventListener("error", (e) => W.errors.push(String(e.message)));
+window.addEventListener("unhandledrejection", (e) => W.errors.push(String(e.reason)));
+
+let info, pid, myName, passcode = QS.get("k") || "";
+let ws, vws, ctx, mixer, micNode, stream, camVideo, left = false, joined = false, retry = 0, vretry = 0;
+let muted = false, camOn = true, selfPeak = 0, capBusy = false;
+const tiles = {}; // slot -> tile element
+let aiName = "Higgs";
+
+function newPid() {
+  const a = new Uint8Array(12); crypto.getRandomValues(a);
+  return Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function toast(text, cls = "") {
+  const t = document.createElement("div");
+  t.className = "toast " + cls; t.textContent = text;
+  $("toasts").appendChild(t);
+  setTimeout(() => t.remove(), 3500);
+}
+
+// ---------- join screen ----------
+async function init() {
+  const r = await fetch(`/api/rooms/${encodeURIComponent(RID)}`);
+  if (!r.ok) { $("jtitle").textContent = "Room not found"; $("jsub").textContent = "Check the link, or ask for a new one."; return; }
+  info = await r.json();
+  aiName = info.ai;
+  document.title = `${info.title} · Meet`;
+  $("jtitle").textContent = info.title;
+  $("jsub").textContent = `${info.people} of ${info.max} people here · ${info.ai} (AI) is in the room`;
+  $("jname").value = store(localStorage, "meet_name") || "";
+  if (info.passcode) { $("jkrow").classList.remove("hidden"); $("jk").value = passcode; }
+  $("jform").classList.remove("hidden");
+  ($("jname").value ? $("jgo") : $("jname")).focus();
+}
+
+async function join() {
+  myName = $("jname").value.trim();
+  if (!myName) { $("jerr").textContent = "Enter your name."; $("jname").focus(); return; }
+  if (info.passcode) passcode = $("jk").value.trim();
+  store(localStorage, "meet_name", myName);
+  $("jgo").disabled = true; $("jerr").textContent = "";
+  try {
+    if (!ctx) await setupMedia();
+    pid = store(sessionStorage, `meet_pid_${RID}`) || newPid();
+    store(sessionStorage, `meet_pid_${RID}`, pid);
+    left = false;
+    connect();
+  } catch (e) {
+    $("jerr").textContent = `Couldn't start: ${e.message}`;
+    $("jgo").disabled = false;
+  }
+}
+
+async function setupMedia() {
+  const audio = { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 };
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio, video: { width: 320, height: 240, frameRate: { ideal: 15 } } });
+  } catch (e) { // no camera (or refused): audio only
+    stream = await navigator.mediaDevices.getUserMedia({ audio });
+    camOn = false;
+  }
+  ctx = new AudioContext({ sampleRate: 24000 });
+  await ctx.audioWorklet.addModule("/worklets.js");
+  micNode = new AudioWorkletNode(ctx, "mic-processor");
+  ctx.createMediaStreamSource(stream).connect(micNode);
+  mixer = new AudioWorkletNode(ctx, "mixer-processor", { outputChannelCount: [2] });
+  mixer.connect(ctx.destination);
+  ctx.resume();
+  micNode.port.onmessage = (e) => {
+    const pcm = new Int16Array(e.data);
+    let p = 0;
+    for (let i = 0; i < pcm.length; i += 4) p = Math.max(p, Math.abs(pcm[i]));
+    if (!muted) selfPeak = Math.max(selfPeak, p / 32768);
+    if (!muted && ws && ws.readyState === 1 && ws.bufferedAmount < 32768) { ws.send(e.data); W.audioTx++; }
+  };
+  mixer.port.onmessage = (e) => {
+    const { levels, gain, drops } = e.data;
+    W.levels = levels; W.gain0 = gain; W.drops = drops;
+    W.peak = levels.map((v, i) => Math.max(W.peak[i] || 0, v)); // loudest level heard per slot (tests)
+    for (const s in tiles) setLevel(+s, +s === W.slot ? selfPeak : levels[s] || 0);
+    selfPeak = 0;
+  };
+  camVideo = document.createElement("video");
+  camVideo.muted = true; camVideo.playsInline = true; camVideo.autoplay = true;
+  if (stream.getVideoTracks().length) { camVideo.srcObject = stream; camVideo.play().catch(() => {}); }
+  setInterval(capture, 125); // ~8 fps
+}
+
+// ---------- control socket ----------
+function connect() {
+  const q = new URLSearchParams({ room: RID, pid, name: myName, k: passcode });
+  const sock = (ws = new WebSocket(wsUrl(`/ws/room?${q}`)));
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => {
+    retry = 0;
+    if (muted) ws.send(JSON.stringify({ type: "mic", on: false }));
+    if (!camOn) ws.send(JSON.stringify({ type: "cam", on: false }));
+  };
+  ws.onmessage = onMessage;
+  ws.onerror = () => {};
+  ws.onclose = (e) => {
+    if (left || sock !== ws) return;
+    const fatal = { 4001: "The room is full (5 people).", 4003: "Wrong passcode.", 4004: "This room doesn't exist any more.",
+      4000: "You joined from another tab, so this one was disconnected." }[e.code];
+    if (fatal) { leaveCall(fatal); return; }
+    if (!joined) { // never got in: back to the join screen
+      $("jerr").textContent = "Couldn't connect. Try again."; $("jgo").disabled = false; return;
+    }
+    toast("Connection lost, reconnecting…");
+    setTimeout(() => !left && connect(), Math.min(5000, 500 * 2 ** retry++));
+  };
+}
+
+function onMessage(e) {
+  if (typeof e.data !== "string") {
+    bump(W.audioRx, new Uint8Array(e.data, 0, 1)[0]);
+    mixer.port.postMessage(e.data, [e.data]);
+    return;
+  }
+  const m = JSON.parse(e.data);
+  bump(W.msgs, m.type);
+  if (m.type === "roster") onRoster(m);
+  else if (m.type === "chat") addChat(m);
+  else if (m.type === "ai_flush") mixer.port.postMessage({ flush: 0 });
+  else if (m.type === "ai_gain") mixer.port.postMessage({ gain: Math.max(0, Math.min(1, +m.gain)), slot: 0, ramp: 0.03 });
+  else if (m.type === "ai_state") onAiState(m);
+  else if (m.type === "line") addLine(m);
+  else if (m.type === "ai_say") aiSay(m.text);
+  else if (m.type === "lab") lab(m);
+}
+
+function onRoster(m) {
+  const first = !joined;
+  if (first) {
+    joined = true;
+    $("join").classList.add("hidden"); $("call").classList.remove("hidden");
+    $("rtitle").textContent = m.title || info.title;
+    toast("Use headphones so nobody hears themselves echo.");
+  } else if (W.roster) {
+    const before = new Set(W.roster.people.map((p) => p.slot + p.name));
+    const now = new Set(m.people.map((p) => p.slot + p.name));
+    for (const p of m.people) if (!before.has(p.slot + p.name) && p.slot !== m.you) toast(`${p.name} joined`);
+    for (const p of W.roster.people) if (!now.has(p.slot + p.name) && p.slot !== m.you) toast(`${p.name} left`);
+  }
+  W.roster = m; W.slot = m.you;
+  aiName = m.ai.name; $("ainame").textContent = aiName + ":";
+  $("side").querySelector("h3").textContent = `Transcript · what ${aiName} heard and decided`;
+  $("count").textContent = `${m.people.length} ${m.people.length === 1 ? "person" : "people"} + ${aiName}`;
+  renderTiles(m);
+  onAiState({ ...m.ai, type: "ai_state" });
+  if (!vws || vws.readyState > 1) connectVideo();
+}
+
+// ---------- tiles ----------
+function makeTile(slot) {
+  const t = document.createElement("div");
+  t.className = "tile"; t.dataset.slot = slot;
+  if (slot === 0) {
+    t.classList.add("ai");
+    t.innerHTML = `<video class="idle" muted playsinline loop></video><video class="live" muted playsinline></video>
+      <div class="orb"><div class="ring"></div><span></span></div><div class="badge"></div><div class="status"></div>
+      <div class="cap"></div><div class="name"></div>`;
+  } else {
+    t.innerHTML = `<div class="ph"><span></span></div><div class="name"><b></b><span class="off hidden">muted</span></div>`;
+    if (slot === W.slot) { t.classList.add("self"); t.prepend(camVideo); camVideo.play().catch(() => {}); } else t.prepend(document.createElement("img"));
+  }
+  if (LAB && slot > 0) {
+    const l = document.createElement("div");
+    l.className = "lab"; l.innerHTML = `<div>now<b><i></i></b></div><div>bc<b><i></i></b></div>`;
+    t.appendChild(l);
+  }
+  return t;
+}
+
+function renderTiles(m) {
+  const want = [{ slot: 0, name: aiName }, ...m.people];
+  const keep = new Set(want.map((p) => p.slot));
+  for (const s in tiles) {
+    const isSelf = tiles[s].classList.contains("self");
+    if (!keep.has(+s) || isSelf !== (+s === m.you && +s > 0)) { // gone, or the slot changed hands
+      const img = tiles[s].querySelector("img");
+      if (img && img.src) URL.revokeObjectURL(img.src);
+      tiles[s].remove(); delete tiles[s];
+    }
+  }
+  for (const p of want) {
+    let t = tiles[p.slot];
+    if (!t) { t = tiles[p.slot] = makeTile(p.slot); }
+    const grid = $("grid");
+    // order: AI, me, then the others by slot
+    const order = (s) => (s === 0 ? -2 : s === m.you ? -1 : s);
+    t.style.order = order(p.slot);
+    if (!t.parentNode) grid.appendChild(t);
+    if (p.slot === 0) { t.querySelector(".name").textContent = `${aiName} · AI`; t.querySelector(".orb span").textContent = aiName[0] || "H"; continue; }
+    t.querySelector(".name b").textContent = p.slot === m.you ? `${p.name} (you)` : p.name;
+    t.querySelector(".ph span").textContent = (p.name[0] || "?").toUpperCase();
+    t.querySelector(".off").classList.toggle("hidden", p.mic !== false);
+    if (p.slot === m.you) t.classList.toggle("has-video", camOn && !!stream.getVideoTracks().length);
+    else { t.dataset.cam = p.cam !== false ? "1" : ""; if (p.cam === false) t.classList.remove("has-video"); }
+  }
+  fit();
+}
+
+function fit() { // largest 4:3 tiles that fit the stage
+  const n = Object.keys(tiles).length, st = $("stage"), gap = 10;
+  const w = st.clientWidth - 24, h = st.clientHeight - 24;
+  let best = 0, bc = 1;
+  if (matchMedia("(max-width: 860px)").matches) { // phone: two columns, the page scrolls
+    bc = Math.min(2, n); best = (w - gap * (bc - 1)) / bc;
+  } else for (let c = 1; c <= n; c++) {
+    const r = Math.ceil(n / c);
+    const tw = Math.min((w - gap * (c - 1)) / c, ((h - gap * (r - 1)) / r) * 4 / 3);
+    if (tw > best) { best = tw; bc = c; }
+  }
+  $("grid").style.gridTemplateColumns = `repeat(${bc}, ${Math.max(120, Math.floor(best))}px)`;
+}
+window.addEventListener("resize", fit);
+
+function setLevel(slot, v) {
+  const t = tiles[slot];
+  if (t) t.style.setProperty("--lvl", Math.min(1, v * 3).toFixed(2));
+}
+
+function lab(m) {
+  if (!LAB || !tiles[m.slot]) return;
+  const bars = tiles[m.slot].querySelectorAll(".lab i");
+  if (bars.length) { bars[0].style.width = `${Math.round((m.p_now || 0) * 100)}%`; bars[1].style.width = `${Math.round((m.p_bc || 0) * 100)}%`; }
+}
+
+// ---------- the AI ----------
+function onAiState(m) {
+  const prev = W.ai;
+  W.ai = { mode: m.mode ?? prev.mode, avatar: m.avatar ?? prev.avatar, status: m.status ?? prev.status };
+  if (m.by && W.ai.mode !== prev.mode) toast(`${m.by} switched ${aiName} to ${MODE_LABEL[W.ai.mode]}`, "mode");
+  if (m.by && W.ai.avatar !== prev.avatar) toast(`${m.by} turned ${aiName}'s avatar ${W.ai.avatar ? "on" : "off"}`, "mode");
+  const sw = $("modesw");
+  sw.setAttribute("aria-checked", String(W.ai.mode === "improved"));
+  sw.querySelectorAll(".opt").forEach((o) => o.classList.toggle("cur", o.dataset.m === W.ai.mode));
+  $("avatar").textContent = `Avatar: ${W.ai.avatar ? "on" : "off"}`;
+  const t = tiles[0];
+  if (!t) return;
+  const b = t.querySelector(".badge");
+  b.textContent = MODE_LABEL[W.ai.mode] || W.ai.mode; b.classList.toggle("improved", W.ai.mode === "improved");
+  t.querySelector(".status").textContent = W.ai.status;
+  for (const s of ["listening", "thinking", "speaking"]) t.classList.toggle(s, W.ai.status === s);
+  t.classList.toggle("idle-on", W.ai.avatar && !!t.querySelector("video.idle").src);
+  if (W.ai.status !== "speaking") setTimeout(() => W.ai.status !== "speaking" && (t.querySelector(".cap").textContent = ""), 4000);
+}
+
+function aiSay(text) {
+  const t = tiles[0];
+  clearTimeout(aiSay.timer);
+  aiSay.timer = setTimeout(() => W.ai.status !== "speaking" && tiles[0] && (tiles[0].querySelector(".cap").textContent = ""), 8000);
+  if (t) { t.querySelector(".cap").innerHTML = ""; const s = document.createElement("span"); s.textContent = text; t.querySelector(".cap").appendChild(s); }
+  addLine({ slot: 0, name: aiName, text });
+}
+
+// ---------- side panel ----------
+function addItem(list, cls, who, text, extra) {
+  const ul = $(list);
+  ul.querySelector(".empty")?.remove();
+  const li = document.createElement("li");
+  li.className = cls;
+  const w = document.createElement("div"); w.className = "who"; w.textContent = who;
+  const x = document.createElement("div"); x.textContent = text;
+  li.append(w, x);
+  if (extra) li.appendChild(extra);
+  const atEnd = ul.scrollHeight - ul.scrollTop - ul.clientHeight < 40;
+  ul.appendChild(li);
+  if (atEnd) ul.scrollTop = 1e9;
+}
+
+function addChat(m) {
+  addItem("chat", m.slot === 0 ? "ai" : "", m.slot === W.slot ? `${m.from} (you)` : m.from, m.text);
+}
+
+function addLine(m) {
+  let extra = null;
+  if (m.decision) {
+    const d = m.decision;
+    extra = document.createElement("div"); extra.className = "sub";
+    const c = document.createElement("span");
+    c.className = "chip" + (d.speak ? " speak" : ""); c.textContent = d.speak ? "SPEAK" : "silent";
+    const rest = Object.entries(d).filter(([k]) => k !== "speak" && k !== "why").map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`);
+    extra.append(c, [d.why, ...rest].filter(Boolean).join(" · "));
+  }
+  addItem("lines", m.slot === 0 ? "ai" : "", m.name || "", m.text, extra);
+}
+
+// ---------- video socket ----------
+function connectVideo() {
+  const sock = (vws = new WebSocket(wsUrl(`/ws/video?${new URLSearchParams({ room: RID, pid })}`)));
+  vws.binaryType = "arraybuffer";
+  vws.onopen = () => (vretry = 0);
+  vws.onmessage = (e) => {
+    if (typeof e.data === "string") {
+      const m = JSON.parse(e.data);
+      bump(W.msgs, m.type);
+      if (m.type === "avatar_start") avatarStart(m.mime);
+      else if (m.type === "avatar_stop") { av.ended = true; pump(); }
+      else if (m.type === "avatar_idle") avatarIdle(m.url);
+      return;
+    }
+    const slot = new Uint8Array(e.data, 0, 1)[0];
+    bump(W.videoRx, slot);
+    if (slot === 0) { if (av.ms) { av.q.push(e.data.slice(1)); W.avatar.chunks++; pump(); } return; }
+    const t = tiles[slot], img = t && t.querySelector("img");
+    if (!img || !t.dataset.cam) return;
+    const url = URL.createObjectURL(new Blob([new Uint8Array(e.data, 1)], { type: "image/jpeg" }));
+    const old = img.src;
+    img.onload = () => { if (old) URL.revokeObjectURL(old); t.classList.add("has-video"); };
+    img.onerror = () => URL.revokeObjectURL(url);
+    img.src = url;
+  };
+  vws.onerror = () => {};
+  vws.onclose = (e) => {
+    if (left || sock !== vws || e.code === 4000 || !ws || ws.readyState > 1) return; // the control socket's reconnect reopens this
+    setTimeout(() => !left && ws.readyState === 1 && (!vws || vws.readyState > 1) && connectVideo(), Math.min(5000, 500 * 2 ** vretry++));
+  };
+}
+
+function capture() {
+  if (!camOn || capBusy || !vws || vws.readyState !== 1 || !camVideo.videoWidth) return;
+  if (vws.bufferedAmount > 65536) { W.videoSkip++; return; } // slow link: skip this frame
+  capBusy = true;
+  const c = capture.c || (capture.c = Object.assign(document.createElement("canvas"), { width: 320, height: 240 }));
+  c.getContext("2d").drawImage(camVideo, 0, 0, 320, 240);
+  c.toBlob((b) => {
+    if (!b) { capBusy = false; return; }
+    b.arrayBuffer().then((ab) => { if (vws.readyState === 1) { vws.send(ab); W.videoTx++; } }).finally(() => (capBusy = false));
+  }, "image/jpeg", 0.6);
+}
+
+// Avatar video on the AI tile: fMP4 chunks appended to a MediaSource (as in read_my_lips/web/agent.js).
+const av = { ms: null, sb: null, q: [], ended: false };
+function avatarStart(mime) {
+  const v = tiles[0]?.querySelector("video.live");
+  if (!v) return;
+  W.avatar.starts++;
+  Object.assign(av, { ms: new MediaSource(), sb: null, q: [], ended: false });
+  if (v.src) URL.revokeObjectURL(v.src);
+  v.src = URL.createObjectURL(av.ms);
+  const ms = av.ms;
+  ms.addEventListener("sourceopen", () => {
+    if (av.ms !== ms) return;
+    try { av.sb = ms.addSourceBuffer(mime); } catch (e) { W.errors.push(`avatar: ${e.message}`); return; }
+    av.sb.mode = "sequence";
+    av.sb.addEventListener("updateend", pump);
+    pump();
+  }, { once: true });
+  v.onplaying = () => { W.avatar.played++; tiles[0].classList.add("av-on"); };
+  v.onended = () => tiles[0]?.classList.remove("av-on");
+  v.play().catch(() => {});
+}
+function pump() {
+  if (!av.sb || av.sb.updating) return;
+  try {
+    if (av.q.length) av.sb.appendBuffer(av.q.shift());
+    else if (av.ended && av.ms.readyState === "open") av.ms.endOfStream();
+  } catch (e) { W.errors.push(`avatar: ${e.message}`); }
+}
+function avatarIdle(url) {
+  const v = tiles[0]?.querySelector("video.idle");
+  if (!v) return;
+  v.src = url; v.play().catch(() => {});
+  tiles[0].classList.toggle("idle-on", W.ai.avatar);
+}
+
+// ---------- controls ----------
+const send = (o) => { if (!ws || ws.readyState !== 1) return false; ws.send(JSON.stringify(o)); return true; };
+$("mic").onclick = () => {
+  muted = !muted;
+  $("mic").textContent = muted ? "Unmute" : "Mute"; $("mic").classList.toggle("on", muted);
+  send({ type: "mic", on: !muted });
+};
+$("cam").onclick = () => {
+  if (!stream.getVideoTracks().length) { toast("No camera"); return; }
+  camOn = !camOn;
+  stream.getVideoTracks().forEach((t) => (t.enabled = camOn));
+  $("cam").textContent = camOn ? "Camera off" : "Camera on"; $("cam").classList.toggle("on", !camOn);
+  tiles[W.slot]?.classList.toggle("has-video", camOn);
+  send({ type: "cam", on: camOn });
+};
+const flipMode = () => send({ type: "set_mode", mode: W.ai.mode === "improved" ? "default" : "improved" });
+$("modesw").onclick = flipMode;
+$("modesw").onkeydown = (e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); flipMode(); } };
+$("avatar").onclick = () => send({ type: "set_avatar", on: !W.ai.avatar });
+$("invite").onclick = () => {
+  const url = `${location.origin}/r/${encodeURIComponent(RID)}${passcode ? `?k=${encodeURIComponent(passcode)}` : ""}`;
+  const ok = () => toast("Invite link copied");
+  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(url).then(ok, () => prompt("Invite link", url));
+  else prompt("Invite link", url);
+};
+$("chatform").onsubmit = (e) => {
+  e.preventDefault();
+  const text = $("chatin").value.trim();
+  if (text && send({ type: "chat", text })) $("chatin").value = "";
+};
+$("leave").onclick = () => leaveCall("You left the call.");
+$("jgo").onclick = join;
+$("jname").onkeydown = $("jk").onkeydown = (e) => e.key === "Enter" && join();
+
+function leaveCall(msg) {
+  left = true; joined = false;
+  try { ws && ws.close(1000); vws && vws.close(1000); } catch {}
+  for (const s in tiles) { tiles[s].remove(); delete tiles[s]; }
+  W.roster = null;
+  $("call").classList.add("hidden"); $("join").classList.remove("hidden");
+  $("jerr").textContent = msg; $("jgo").disabled = false; $("jgo").textContent = "Rejoin";
+}
+
+init().catch((e) => { $("jtitle").textContent = "Couldn't load the room"; $("jerr").textContent = e.message; });

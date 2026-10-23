@@ -1,0 +1,21 @@
+[project]
+name = "mmhm"
+version = "0.1.0"
+description = "A turn-taking layer for Higgs Realtime: waits for you to finish, ignores your mm-hms, and says mm-hm back."
+requires-python = ">=3.11"
+dependencies = ["numpy", "scipy", "soundfile", "requests", "websockets", "torch", "einops", "huggingface-hub",
+                "transformers"]
+# MaAI (MIT) must be installed separately without its GUI/audio-device dependencies:
+#   pip install --no-deps maai==0.2.25
+
+[project.optional-dependencies]
+app = ["fastapi", "uvicorn"]
+mic = ["sounddevice"]
+test = ["playwright"]
+
+[tool.setuptools]
+packages = ["mmhm"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

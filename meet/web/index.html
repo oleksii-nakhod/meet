@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meet · new room</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='8' width='19' height='16' rx='4' fill='%235ec8ff'/%3E%3Cpath d='M22 13l7-4v14l-7-4z' fill='%23b98cff'/%3E%3C/svg%3E">
+<style>
+:root { --bg: #0e0f13; --panel: #171922; --ink: #f2f2f5; --muted: #9a9cab; --line: #2a2d3a; --accent: #5ec8ff; --ai: #b98cff; --danger: #ff4d5e; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 620px; margin: 0 auto; padding: 32px 16px 64px; }
+header { display: flex; gap: 12px; align-items: baseline; margin-bottom: 20px; }
+.brand { font-weight: 750; font-size: 20px; } .brand span { color: var(--ai); }
+.sub { color: var(--muted); font-size: 14px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 22px; }
+label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+input, textarea { width: 100%; font: inherit; font-size: 15px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; }
+textarea { min-height: 130px; resize: vertical; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+button { font: inherit; border: 0; border-radius: 12px; padding: 13px 20px; cursor: pointer; background: var(--ink); color: var(--bg); font-weight: 650; margin-top: 18px; width: 100%; }
+button:disabled { opacity: .5; cursor: default; }
+#err { color: var(--danger); font-size: 14px; min-height: 1.5em; margin-top: 8px; }
+#done { margin-top: 18px; }
+#done a { color: var(--accent); word-break: break-all; font-size: 17px; }
+#done .ghost { background: #232633; color: var(--ink); border: 1px solid var(--line); }
+.hidden { display: none !important; }
+@media (max-width: 520px) { .row { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <header><span class="brand">Meet <span>+ Higgs</span></span><span class="sub">a small video call with an AI in the room</span></header>
+  <section class="card" id="form">
+    <label for="title">Room title</label><input id="title" value="Team sync" maxlength="120">
+    <div class="row">
+      <div><label for="ai">AI name</label><input id="ai" value="Higgs" maxlength="40"></div>
+      <div><label for="passcode">Passcode (optional)</label><input id="passcode" maxlength="64" autocomplete="off"></div>
+    </div>
+    <label for="setting">Setting (one line)</label><input id="setting" value="hackathon team meeting" maxlength="300">
+    <label for="facts">What the AI knows (one fact per line)</label>
+    <textarea id="facts">The demo video must be 2 to 3 minutes and show the project running.
+Submissions close Saturday at 3 pm.</textarea>
+    <div id="adminrow" class="hidden"><label for="admin">Admin token</label><input id="admin" type="password" autocomplete="off"></div>
+    <button id="create">Create room</button>
+    <div id="err"></div>
+  </section>
+  <section class="card hidden" id="done">
+    <div class="sub">Room ready. Share this link (2–5 people):</div>
+    <p><a id="link" href="#"></a></p>
+    <button id="copy" class="ghost">Copy link</button>
+    <button id="join">Join now</button>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const store = (k, v) => { try { if (v === undefined) return sessionStorage.getItem(k); sessionStorage.setItem(k, v); } catch { return null; } };
+const fromUrl = new URLSearchParams(location.search).get("admin");
+if (fromUrl) { store("meet_admin", fromUrl); history.replaceState(null, "", location.pathname); }
+$("admin").value = store("meet_admin") || "";
+fetch("/api/config").then((r) => r.json()).then((c) => { if (c.admin_required && !$("admin").value) $("adminrow").classList.remove("hidden"); });
+
+$("create").onclick = async () => {
+  $("create").disabled = true; $("err").textContent = "";
+  try {
+    const body = {
+      title: $("title").value.trim(), ai: $("ai").value.trim() || "Higgs", setting: $("setting").value.trim(),
+      facts: $("facts").value.split("\n").map((s) => s.trim()).filter(Boolean), passcode: $("passcode").value.trim(),
+      admin: $("admin").value.trim(),
+    };
+    const r = await fetch("/api/rooms", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok) { $("adminrow").classList.remove("hidden"); throw new Error(d.error || r.statusText); }
+    if (body.admin) store("meet_admin", body.admin);
+    const url = location.origin + d.link + (body.passcode ? `?k=${encodeURIComponent(body.passcode)}` : "");
+    $("link").textContent = url; $("link").href = url;
+    $("form").classList.add("hidden"); $("done").classList.remove("hidden");
+    $("join").onclick = () => (location.href = url);
+    $("copy").onclick = () => navigator.clipboard.writeText(url).then(() => ($("copy").textContent = "Copied"), () => {});
+  } catch (e) { $("err").textContent = e.message; $("create").disabled = false; }
+};
+</script>
+</body>
+</html>

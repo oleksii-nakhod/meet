@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meet</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='8' width='19' height='16' rx='4' fill='%235ec8ff'/%3E%3Cpath d='M22 13l7-4v14l-7-4z' fill='%23b98cff'/%3E%3C/svg%3E">
+<style>
+:root { --bg: #0e0f13; --panel: #171922; --ink: #f2f2f5; --muted: #9a9cab; --line: #2a2d3a; --chip: #232633;
+  --accent: #5ec8ff; --ai: #b98cff; --ok: #4ade80; --danger: #ff4d5e; --warn: #ffb547; }
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+button { font: inherit; color: inherit; border: 0; border-radius: 12px; padding: 10px 16px; cursor: pointer; background: var(--chip); border: 1px solid var(--line); }
+button:hover { border-color: var(--muted); }
+button:disabled { opacity: .5; cursor: default; }
+.primary { background: var(--ink); color: var(--bg); font-weight: 650; border-color: var(--ink); }
+.hidden { display: none !important; }
+input { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; width: 100%; }
+.sub { color: var(--muted); font-size: 13px; }
+.brand { font-weight: 750; } .brand span { color: var(--ai); }
+
+/* join */
+#join { max-width: 460px; margin: 0 auto; padding: 48px 16px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 22px; }
+.card h1 { font-size: 26px; margin: 4px 0 4px; line-height: 1.2; }
+.card label { display: block; font-size: 13px; color: var(--muted); margin: 14px 0 4px; }
+.card .primary { width: 100%; margin-top: 18px; padding: 13px; }
+.hint { font-size: 13px; color: var(--muted); margin-top: 14px; border-left: 3px solid var(--warn); padding-left: 10px; }
+#jerr { color: var(--danger); font-size: 14px; min-height: 1.4em; margin-top: 8px; }
+
+/* call */
+#call { height: 100dvh; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+#top { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+#top .title { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#top .grow { flex: 1; }
+#body { display: grid; grid-template-columns: minmax(0, 1fr) 340px; min-height: 0; }
+#stage { min-width: 0; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 12px; }
+#grid { display: grid; gap: 10px; justify-content: center; align-content: center; }
+.tile { position: relative; aspect-ratio: 4 / 3; background: #0a0b0f; border-radius: 14px; overflow: hidden;
+  border: 1px solid var(--line); box-shadow: 0 0 0 calc(var(--lvl, 0) * 5px) rgba(74, 222, 128, calc(.25 + var(--lvl, 0) * .6));
+  transition: box-shadow .1s linear; }
+.tile video, .tile img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.tile.self video { transform: scaleX(-1); }
+.tile .ph { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+.tile .ph span { width: 30%; aspect-ratio: 1; border-radius: 50%; background: #2a2d3a; display: flex; align-items: center; justify-content: center; font-size: clamp(20px, 4vw, 42px); font-weight: 650; }
+.tile.has-video .ph { display: none; }
+.tile .name { position: absolute; left: 8px; bottom: 8px; font-size: 13px; background: rgba(0,0,0,.55); padding: 2px 9px; border-radius: 99px; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile .name .off { color: var(--danger); margin-left: 6px; font-size: 12px; }
+.tile .lab { position: absolute; right: 8px; bottom: 8px; display: grid; gap: 3px; width: 90px; font-size: 10px; background: rgba(0,0,0,.55); padding: 4px 6px; border-radius: 8px; }
+.tile .lab div { display: grid; grid-template-columns: 22px 1fr; align-items: center; gap: 4px; }
+.tile .lab b { display: block; height: 5px; background: #2a2d3a; border-radius: 3px; overflow: hidden; }
+.tile .lab i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .1s linear; }
+.tile .lab div + div i { background: var(--warn); }
+/* the AI tile */
+.tile.ai { border-color: #3b2f57; background: radial-gradient(circle at 50% 42%, #221a33, #0a0b0f 70%); }
+.tile.ai .orb { position: absolute; left: 50%; top: 44%; width: 28%; aspect-ratio: 1; transform: translate(-50%, -50%); }
+.tile.ai .orb span { position: absolute; inset: 0; border-radius: 50%; background: linear-gradient(135deg, #b98cff, #5ec8ff); display: flex; align-items: center; justify-content: center; font-size: clamp(20px, 4vw, 44px); font-weight: 750; color: #0e0f13; }
+.tile.ai .ring { position: absolute; inset: 0; border-radius: 50%; border: 3px solid var(--ai); opacity: calc(.15 + var(--lvl, 0) * .85);
+  transform: scale(calc(1.08 + var(--lvl, 0) * .45)); transition: transform .1s linear, opacity .1s linear; }
+.tile.ai.thinking .ring { animation: think 1.2s ease-in-out infinite; border-style: dashed; }
+@keyframes think { 50% { transform: scale(1.2) rotate(30deg); opacity: .6; } }
+.tile.ai video { opacity: 0; transition: opacity .15s; }
+.tile.ai.idle-on video.idle, .tile.ai.av-on video.live { opacity: 1; }
+.tile.ai.idle-on .orb, .tile.ai.av-on .orb { visibility: hidden; }
+.tile.ai .badge { position: absolute; left: 8px; top: 8px; font-size: 12px; font-weight: 650; padding: 2px 9px; border-radius: 99px; background: rgba(0,0,0,.55); border: 1px solid var(--line); color: var(--muted); }
+.tile.ai .badge.improved { color: var(--ok); border-color: var(--ok); }
+.tile.ai .status { position: absolute; right: 8px; top: 8px; font-size: 12px; padding: 2px 9px; border-radius: 99px; background: rgba(0,0,0,.55); color: var(--muted); }
+.tile.ai.speaking .status { color: var(--ok); } .tile.ai.thinking .status { color: var(--warn); }
+.tile.ai .cap { position: absolute; left: 8px; right: 8px; bottom: 36px; text-align: center; font-size: 14px; line-height: 1.3; }
+.tile.ai .cap span { background: rgba(0,0,0,.7); padding: 2px 8px; border-radius: 6px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.tile.ai .cap:empty { display: none; }
+
+/* side panel */
+#side { border-left: 1px solid var(--line); display: grid; grid-template-rows: auto minmax(0, 1.2fr) auto minmax(0, 1fr) auto; min-height: 0; background: var(--panel); }
+#side h3 { margin: 0; padding: 10px 14px 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+#side ul { list-style: none; margin: 0; padding: 0 14px 8px; overflow: auto; min-height: 0; }
+#side li { padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 14px; overflow-wrap: anywhere; }
+#side li .who { font-size: 12px; color: var(--muted); }
+#side li.ai .who { color: var(--ai); }
+#side li.sys { color: var(--muted); font-size: 12px; border: 0; padding: 2px 0; }
+#side .empty { color: var(--muted); font-size: 13px; border: 0; }
+.chip { display: inline-block; font-size: 11px; font-weight: 650; border-radius: 99px; padding: 0 7px; margin-right: 6px; border: 1px solid var(--line); color: var(--muted); }
+.chip.speak { color: var(--ok); border-color: var(--ok); }
+#chatform { display: flex; gap: 8px; padding: 10px 14px 12px; border-top: 1px solid var(--line); }
+#chatform button { padding: 8px 14px; }
+
+/* controls */
+#controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: center; padding: 10px 16px; border-top: 1px solid var(--line); }
+#controls .on { border-color: var(--danger); color: var(--danger); }
+#leave { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 650; }
+.switch { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border: 1px solid #3b2f57; border-radius: 12px; background: #1c1729; cursor: pointer; user-select: none; }
+.switch .lbl { font-weight: 650; color: var(--ai); }
+.switch .opt { color: var(--muted); font-size: 14px; } .switch .opt.cur { color: var(--ink); font-weight: 650; }
+.switch .track { width: 44px; height: 24px; border-radius: 99px; background: #2a2d3a; position: relative; transition: background .15s; }
+.switch .track i { position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: var(--ink); transition: left .15s; }
+.switch[aria-checked="true"] .track { background: var(--ok); } .switch[aria-checked="true"] .track i { left: 23px; }
+#toasts { position: fixed; top: 60px; left: 50%; transform: translateX(-50%); display: grid; gap: 8px; z-index: 10; pointer-events: none; width: min(92vw, 420px); }
+.toast { background: #232633; border: 1px solid var(--line); border-radius: 12px; padding: 9px 14px; font-size: 14px; text-align: center; box-shadow: 0 6px 24px rgba(0,0,0,.4); animation: pop .2s ease-out; }
+.toast.mode { border-color: var(--ai); }
+@keyframes pop { from { transform: translateY(-6px); opacity: 0; } }
+@media (max-width: 860px) {
+  #call { height: auto; min-height: 100dvh; display: flex; flex-direction: column; }
+  #body { display: contents; }
+  #stage { order: 1; } #controls { order: 2; } #side { order: 3; }
+  #stage { padding: 10px 12px; }
+  #side { border-left: 0; border-top: 1px solid var(--line); height: 70vh; }
+  #top .sub { display: none; }
+  #controls { border-bottom: 1px solid var(--line); }
+}
+</style>
+</head>
+<body>
+<section id="join">
+  <div class="card">
+    <div class="brand">Meet <span>+ Higgs</span></div>
+    <h1 id="jtitle">Joining…</h1>
+    <div class="sub" id="jsub"></div>
+    <div id="jform" class="hidden">
+      <label for="jname">Your name</label><input id="jname" maxlength="40" autocomplete="name">
+      <div id="jkrow" class="hidden"><label for="jk">Passcode</label><input id="jk" maxlength="64" autocomplete="off"></div>
+      <button id="jgo" class="primary">Join with camera and mic</button>
+      <div class="hint">Use headphones: the call doesn't cancel your speakers' echo perfectly, and the AI listens too.</div>
+    </div>
+    <div id="jerr"></div>
+  </div>
+</section>
+
+<section id="call" class="hidden">
+  <header id="top">
+    <span class="brand">Meet <span>+ Higgs</span></span>
+    <span class="title" id="rtitle"></span>
+    <span class="sub" id="count"></span>
+    <span class="grow"></span>
+    <button id="invite">Copy invite link</button>
+  </header>
+  <div id="body">
+    <div id="stage"><div id="grid"></div></div>
+    <aside id="side">
+      <h3>Transcript · what Higgs heard and decided</h3>
+      <ul id="lines"><li class="empty">Lines appear here as Higgs hears them.</li></ul>
+      <h3>Chat</h3>
+      <ul id="chat"><li class="empty">No messages yet.</li></ul>
+      <form id="chatform" autocomplete="off"><input id="chatin" maxlength="2000" placeholder="Message everyone"><button>Send</button></form>
+    </aside>
+  </div>
+  <footer id="controls">
+    <button id="mic">Mute</button>
+    <button id="cam">Camera off</button>
+    <div class="switch" id="modesw" role="switch" aria-checked="false" tabindex="0" title="Switch Higgs for everyone">
+      <span class="lbl" id="ainame">Higgs</span><span class="opt cur" data-m="default">default</span>
+      <span class="track"><i></i></span><span class="opt" data-m="improved">improved</span>
+    </div>
+    <button id="avatar">Avatar: off</button>
+    <button id="leave">Leave</button>
+  </footer>
+</section>
+<div id="toasts"></div>
+<script src="/room.js"></script>
+</body>
+</html>

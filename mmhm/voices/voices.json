@@ -1,0 +1,19 @@
+{
+ "maya": {
+  "voice": "voice_35bb36e156fdc13c7de4358d9d16dfc9c8a9b70d9ac81fec03a3ffed8f78b445",
+  "library_id": "understated-v07-s0",
+  "library_name": "The Soft Canadian Companion",
+  "portrait": "maya.jpg",
+  "ref_audio": "maya_ref.mp3",
+  "ref_text": "maya_ref.txt"
+ },
+ "ella": {
+  "voice": "voice_aca024debbb9ce3f32a478cfd4ba594cac716ec2f4b8479730e7584f9a15dae7",
+  "library_id": "medical-v04-s0",
+  "library_name": "The Friendly Pharmacist",
+  "portrait": "ella_pharmacist.jpg",
+  "ref_audio": "ella_ref.mp3",
+  "ref_text": "ella_ref.txt"
+ },
+ "_note": "Voices and portraits from the hackathon voice library (boson-hackathon-voices.pages.dev). The voice ids are registered under one API key; on another key run common/register_voices.py."
+}

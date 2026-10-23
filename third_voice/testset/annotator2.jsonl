@@ -1,0 +1,380 @@
+{"meeting_id": "A1", "line": 0, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A1", "line": 1, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A1", "line": 2, "label": "SILENT", "category": "unfinished"}
+{"meeting_id": "A1", "line": 3, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A1", "line": 4, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "A1", "line": 5, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "A1", "line": 6, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A1", "line": 7, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A1", "line": 8, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A1", "line": 9, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "A1", "line": 10, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A1", "line": 11, "label": "SPEAK", "category": "correction"}
+{"meeting_id": "A1", "line": 12, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A1", "line": 13, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A1", "line": 14, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "A1", "line": 15, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A1", "line": 16, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "A1", "line": 17, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A1", "line": 18, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "A1", "line": 19, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A1", "line": 20, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "A1", "line": 21, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A1", "line": 22, "label": "SILENT", "category": "answered"}
+{"meeting_id": "A1", "line": 23, "label": "SILENT", "category": "mention"}
+{"meeting_id": "A1", "line": 24, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A1", "line": 25, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A1", "line": 26, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "A1", "line": 27, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A1", "line": 28, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "A1", "line": 29, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 0, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 1, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 2, "label": "SPEAK", "category": "correction"}
+{"meeting_id": "A2", "line": 3, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 4, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 5, "label": "SILENT", "category": "answered"}
+{"meeting_id": "A2", "line": 6, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "A2", "line": 7, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "A2", "line": 8, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 9, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 10, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "A2", "line": 11, "label": "SILENT", "category": "answered"}
+{"meeting_id": "A2", "line": 12, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 13, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 14, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "A2", "line": 15, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "A2", "line": 16, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 17, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 18, "label": "SILENT", "category": "unfinished"}
+{"meeting_id": "A2", "line": 19, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 20, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "A2", "line": 21, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 22, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 23, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "A2", "line": 24, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 25, "label": "SILENT", "category": "mention"}
+{"meeting_id": "A2", "line": 26, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 27, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "A2", "line": 28, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 29, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "A2", "line": 30, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A2", "line": 31, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 0, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 1, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 2, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 3, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "A3", "line": 4, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "A3", "line": 5, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 6, "label": "SILENT", "category": "unfinished"}
+{"meeting_id": "A3", "line": 7, "label": "SPEAK", "category": "correction"}
+{"meeting_id": "A3", "line": 8, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 9, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "A3", "line": 10, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 11, "label": "SILENT", "category": "answered"}
+{"meeting_id": "A3", "line": 12, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 13, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "A3", "line": 14, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 15, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 16, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 17, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 18, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "A3", "line": 19, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 20, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "A3", "line": 21, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 22, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 23, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "A3", "line": 24, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 25, "label": "SILENT", "category": "mention"}
+{"meeting_id": "A3", "line": 26, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "A3", "line": 27, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 28, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 29, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 30, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A3", "line": 31, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 0, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "A4", "line": 1, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 2, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 3, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "A4", "line": 4, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 5, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 6, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 7, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 8, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 9, "label": "SPEAK", "category": "correction"}
+{"meeting_id": "A4", "line": 10, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 11, "label": "SILENT", "category": "answered"}
+{"meeting_id": "A4", "line": 12, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 13, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "A4", "line": 14, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 15, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 16, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "A4", "line": 17, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 18, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "A4", "line": 19, "label": "SILENT", "category": "unfinished"}
+{"meeting_id": "A4", "line": 20, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 21, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "A4", "line": 22, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 23, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "A4", "line": 24, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 25, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 26, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "A4", "line": 27, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 28, "label": "SILENT", "category": "mention"}
+{"meeting_id": "A4", "line": 29, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "A4", "line": 30, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 0, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "B1", "line": 1, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 2, "label": "SILENT", "category": "unfinished"}
+{"meeting_id": "B1", "line": 3, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "B1", "line": 4, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 5, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "B1", "line": 6, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 7, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "B1", "line": 8, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 9, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 10, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 11, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "B1", "line": 12, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 13, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 14, "label": "SPEAK", "category": "correction"}
+{"meeting_id": "B1", "line": 15, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 16, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "B1", "line": 17, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 18, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "B1", "line": 19, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 20, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 21, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "B1", "line": 22, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 23, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "B1", "line": 24, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 25, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 26, "label": "SILENT", "category": "answered"}
+{"meeting_id": "B1", "line": 27, "label": "SILENT", "category": "mention"}
+{"meeting_id": "B1", "line": 28, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "B1", "line": 29, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B1", "line": 30, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "B1", "line": 31, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 0, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 1, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 2, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "B2", "line": 3, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 4, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 5, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 6, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "B2", "line": 7, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "B2", "line": 8, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 9, "label": "SPEAK", "category": "correction"}
+{"meeting_id": "B2", "line": 10, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 11, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 12, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 13, "label": "SILENT", "category": "unfinished"}
+{"meeting_id": "B2", "line": 14, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "B2", "line": 15, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 16, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "B2", "line": 17, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 18, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 19, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "B2", "line": 20, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 21, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 22, "label": "SPEAK", "category": "correction"}
+{"meeting_id": "B2", "line": 23, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 24, "label": "SILENT", "category": "mention"}
+{"meeting_id": "B2", "line": 25, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "B2", "line": 26, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 27, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "B2", "line": 28, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 29, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B2", "line": 30, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "B2", "line": 31, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 0, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 1, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 2, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "B3", "line": 3, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 4, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 5, "label": "SILENT", "category": "unfinished"}
+{"meeting_id": "B3", "line": 6, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 7, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "B3", "line": 8, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 9, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "B3", "line": 10, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 11, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "B3", "line": 12, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 13, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "B3", "line": 14, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 15, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 16, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "B3", "line": 17, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 18, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 19, "label": "SPEAK", "category": "correction"}
+{"meeting_id": "B3", "line": 20, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 21, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "B3", "line": 22, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 23, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "B3", "line": 24, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 25, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 26, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "B3", "line": 27, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 28, "label": "SILENT", "category": "mention"}
+{"meeting_id": "B3", "line": 29, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B3", "line": 30, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 0, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 1, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 2, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "B4", "line": 3, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "B4", "line": 4, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 5, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 6, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "B4", "line": 7, "label": "SILENT", "category": "unfinished"}
+{"meeting_id": "B4", "line": 8, "label": "SPEAK", "category": "correction"}
+{"meeting_id": "B4", "line": 9, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 10, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 11, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 12, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "B4", "line": 13, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 14, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "B4", "line": 15, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 16, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "B4", "line": 17, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "B4", "line": 18, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 19, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 20, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 21, "label": "SILENT", "category": "answered"}
+{"meeting_id": "B4", "line": 22, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 23, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "B4", "line": 24, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 25, "label": "SILENT", "category": "mention"}
+{"meeting_id": "B4", "line": 26, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "B4", "line": 27, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 28, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 29, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "B4", "line": 30, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "B4", "line": 31, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 0, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 1, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "C1", "line": 2, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 3, "label": "SILENT", "category": "unfinished"}
+{"meeting_id": "C1", "line": 4, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 5, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "C1", "line": 6, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 7, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "C1", "line": 8, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "C1", "line": 9, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 10, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 11, "label": "SPEAK", "category": "correction"}
+{"meeting_id": "C1", "line": 12, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 13, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 14, "label": "SILENT", "category": "answered"}
+{"meeting_id": "C1", "line": 15, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 16, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "C1", "line": 17, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "C1", "line": 18, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 19, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "C1", "line": 20, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 21, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "C1", "line": 22, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 23, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "C1", "line": 24, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 25, "label": "SILENT", "category": "mention"}
+{"meeting_id": "C1", "line": 26, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "C1", "line": 27, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 28, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "C1", "line": 29, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 30, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C1", "line": 31, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 0, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 1, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "C2", "line": 2, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 3, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "C2", "line": 4, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 5, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "C2", "line": 6, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 7, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 8, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "C2", "line": 9, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 10, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "C2", "line": 11, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 12, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 13, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 14, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "C2", "line": 15, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 16, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "C2", "line": 17, "label": "SILENT", "category": "unfinished"}
+{"meeting_id": "C2", "line": 18, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 19, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 20, "label": "SPEAK", "category": "correction"}
+{"meeting_id": "C2", "line": 21, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 22, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "C2", "line": 23, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 24, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 25, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 26, "label": "SILENT", "category": "unfinished"}
+{"meeting_id": "C2", "line": 27, "label": "SPEAK", "category": "correction"}
+{"meeting_id": "C2", "line": 28, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 29, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "C2", "line": 30, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C2", "line": 31, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C3", "line": 0, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "C3", "line": 1, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C3", "line": 2, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C3", "line": 3, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "C3", "line": 4, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C3", "line": 5, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C3", "line": 6, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "C3", "line": 7, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C3", "line": 8, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "C3", "line": 9, "label": "SILENT", "category": "unfinished"}
+{"meeting_id": "C3", "line": 10, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C3", "line": 11, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "C3", "line": 12, "label": "SILENT", "category": "answered"}
+{"meeting_id": "C3", "line": 13, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "C3", "line": 14, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C3", "line": 15, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C3", "line": 16, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "C3", "line": 17, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C3", "line": 18, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "C3", "line": 19, "label": "SILENT", "category": "answered"}
+{"meeting_id": "C3", "line": 20, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C3", "line": 21, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "C3", "line": 22, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C3", "line": 23, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "C3", "line": 24, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C3", "line": 25, "label": "SPEAK", "category": "correction"}
+{"meeting_id": "C3", "line": 26, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C3", "line": 27, "label": "SILENT", "category": "mention"}
+{"meeting_id": "C3", "line": 28, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "C3", "line": 29, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "C3", "line": 30, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "C3", "line": 31, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 0, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 1, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 2, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 3, "label": "SPEAK", "category": "addressed"}
+{"meeting_id": "C4", "line": 4, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 5, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 6, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 7, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "C4", "line": 8, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 9, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 10, "label": "SILENT", "category": "unfinished"}
+{"meeting_id": "C4", "line": 11, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 12, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "C4", "line": 13, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 14, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 15, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "C4", "line": 16, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 17, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "C4", "line": 18, "label": "SILENT", "category": "to_person"}
+{"meeting_id": "C4", "line": 19, "label": "SPEAK", "category": "group_question_known"}
+{"meeting_id": "C4", "line": 20, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 21, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 22, "label": "SILENT", "category": "answered"}
+{"meeting_id": "C4", "line": 23, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 24, "label": "SILENT", "category": "group_question_unknown"}
+{"meeting_id": "C4", "line": 25, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 26, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 27, "label": "SILENT", "category": "mention"}
+{"meeting_id": "C4", "line": 28, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 29, "label": "SILENT", "category": "rhetorical / chat"}
+{"meeting_id": "C4", "line": 30, "label": "SILENT", "category": "unfinished"}
+{"meeting_id": "C4", "line": 31, "label": "SILENT", "category": "rhetorical / chat"}
