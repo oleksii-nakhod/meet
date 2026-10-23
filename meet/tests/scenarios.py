@@ -118,6 +118,36 @@ SCENARIOS2 = [
         ("say", "Priya", "Get the vegetarian one too.", "silent", {"gap": 0.3})]),
 ]
 
+SCENARIOS3 = [  # the Avatar on (improved mode only): audio waits for the face's first video chunk
+    dict(name="av_greet", avatar=True, modes=("improved",), people=["Alex"], steps=[
+        ("say", "Alex", "Hey, Higgs.", "reply"),
+        ("say", "Alex", "When do submissions close?", "reply"),
+        ("say", "Alex", "Give me one idea for the demo opening.", "reply")]),
+    dict(name="av_group", avatar=True, modes=("improved",), people=["Alex", "Priya"], steps=[
+        ("say", "Alex", "Higgs, what do you think we should call the project?", "reply"),
+        ("say", "Priya", "Priya here, I like Third Voice.", "silent"),
+        ("say", "Alex", "Higgs, how long can the video be?", "reply")]),
+    dict(name="av_noise_during_render", avatar=True, modes=("improved",), people=["Alex", "Priya"], steps=[
+        ("say", "Alex", "Higgs, when do submissions close?", "reply"),
+        ("say", "Priya", "Higgs, how much is innovation worth?", "reply", {"then_cue": ("Alex", "Mm.", 1.0)})]),
+    dict(name="av_bc", avatar=True, modes=("improved",), people=["Alex"], steps=[
+        ("talk_over", "Alex", LONG_Q, ("Alex", "Mm-hm."), "continue"),
+        ("talk_over", "Alex", "Higgs, what's the riskiest part of our plan?", ("Alex", "Wait, sorry, one question."), "stop")]),
+]
+
+SCENARIOS4 = [  # long: past Higgs's 5-minute idle timeout (session.idle_timeout), then talk again
+    dict(name="idle_6min_1to1", people=["Alex"], steps=[
+        ("say", "Alex", "Hey Higgs, I'll be quiet for a few minutes, I'm reading the rules.", "any"),
+        ("wait", 335),
+        ("say", "Alex", "Okay, I'm back. Higgs, when do submissions close?", "reply"),
+        ("say", "Alex", "And how long can the video be?", "reply")]),
+    dict(name="idle_6min_group", people=["Alex", "Priya"], steps=[
+        ("say", "Alex", "Higgs, how long can the video be?", "reply"),
+        ("wait", 335),
+        ("say", "Priya", "Sorry, I was away. Higgs, when do submissions close?", "reply"),
+        ("say", "Alex", "Higgs, and what are the judging criteria?", "reply")]),
+]
+
 SCENARIOS = [
     # ---------------- one person and Higgs ----------------
     dict(name="greet_1to1", people=["Alex"], steps=[
@@ -258,6 +288,10 @@ async def run_step(step, bots_, ear, mode):
         pcm = speech(sp, VOICES[who])
         t_start = b.now()
         t_end = await b.say(pcm)
+        if "then_cue" in opts:  # someone makes a short sound while the reply is being prepared
+            w2, sp2, delay = opts["then_cue"]
+            await asyncio.sleep(delay)
+            bots_[w2].say(speech(sp2, VOICES[w2]))
         win = opts.get("window", 9.0 if expect == "reply" else 5.0)
         on = ear.ai_onsets(t_start)
         if not on and expect != "silent":
@@ -437,7 +471,7 @@ def short(r):
 async def main_async(a):
     outdir = os.path.join(MEET, "out", "scen", a.tag)
     os.makedirs(outdir, exist_ok=True)
-    pool = {"1": SCENARIOS, "2": SCENARIOS2, "all": SCENARIOS + SCENARIOS2}[a.set]
+    pool = {"1": SCENARIOS, "2": SCENARIOS2, "3": SCENARIOS3, "4": SCENARIOS4, "all": SCENARIOS + SCENARIOS2}[a.set]
     todo = [(sc, m) for sc in pool if not a.only or sc["name"] in a.only for m in a.modes
             if m in sc.get("modes", ("default", "improved"))]
     # warm the TTS cache first (parallel, outside the timed part)
@@ -488,7 +522,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--modes", nargs="+", default=["improved", "default"])
     ap.add_argument("--only", nargs="*")
-    ap.add_argument("--set", default="1", choices=["1", "2", "all"])
+    ap.add_argument("--set", default="1", choices=["1", "2", "3", "4", "all"])
     ap.add_argument("--par", type=int, default=4)
     ap.add_argument("--port", type=int, default=8641)
     ap.add_argument("--samples", type=int, default=3)

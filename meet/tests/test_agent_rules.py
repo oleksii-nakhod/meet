@@ -17,6 +17,9 @@ def test_fix_name():
     assert agent.fix_name("thanks, Hicks.", "Higgs") == "thanks, Higgs."
     assert agent.fix_name("Pigs are cute, right?", "Higgs") == "Pigs are cute, right?"  # not set off by a comma
     assert agent.fix_name("Okay, thanks.", "Higgs") == "Okay, thanks."
+    assert agent.fix_name("Eva, can you check it?", "Ava", ["Eva", "Tom"]) == "Eva, can you check it?"  # a person
+    assert agent.fix_name("Eva, can you check it?", "Ava", ["Tom"]) == "Ava, can you check it?"
+    assert agent.fix_name("Pigs. And what now?", "Higgs") == "Higgs. And what now?"
 
 
 def test_prefilter():

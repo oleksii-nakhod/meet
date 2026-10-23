@@ -60,7 +60,7 @@ async def main_async(a):
     rows = [json.loads(x) for x in open(os.path.join(MEET, "..", "third_voice", "testset", f"points_{a.set}.jsonl"))]
     async def one(r, prompt):
         hist = r["context_turns"]
-        text, kind = agent.prefilter(r["current_turn"]["text"], r["target_speaker"], hist)
+        text, kind = agent.prefilter(r["current_turn"]["text"], r["target_speaker"], hist, r["people"])
         if kind and prompt != "v4b":  # the live agent's pre-filters (added with v5)
             return False, {"reading": {"prefilter": kind}}
         r2 = {**r, "current_turn": {**r["current_turn"], "text": text}}

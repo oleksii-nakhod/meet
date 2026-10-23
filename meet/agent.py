@@ -36,7 +36,7 @@ import tv_eval  # noqa: E402
 
 VOICE = os.environ.get("MEET_VOICE", "chloe")      # the same preset voice in both modes, so the voice doesn't tell
 SAMPLES = int(os.environ.get("MEET_SAMPLES", "3"))  # judge/fact-check samples per line (1 for cheap test runs)
-BUDGET = int(os.environ.get("MEET_BUDGET", "5000"))
+BUDGET = int(os.environ.get("MEET_BUDGET", "30000"))  # requests per server run (~10 per judged line in improved mode)
 LANG = os.environ.get("MEET_LANG", "en")           # transcription language hint ("" = auto: "mm" came back as "嗯")
 SPECULATE = os.environ.get("MEET_SPECULATE", "1") == "1"  # voice likely replies while the judge decides
 PROMPT = os.environ.get("MEET_PROMPT", "v5")       # judge prompt (see judge_prompt)
@@ -65,8 +65,9 @@ PERSONA = ("You are {ai}, an AI participant with a voice in an online meeting ({
 
 
 def spend(n=1):
-    """Count Higgs requests; False once the budget is used up."""
+    """Count Higgs requests; False once the budget is used up (the agent then goes quiet: rooms are told once)."""
     if CALLS["n"] + n > BUDGET:
+        CALLS["over"] = True
         return False
     CALLS["n"] += n
     return True
@@ -212,15 +213,19 @@ def backchannel(text):
     return bool(words) and len(words) <= 3 and not t.endswith("?") and all(w in BACKCHANNEL for w in words)
 
 
-def fix_name(text, ai):
+def fix_name(text, ai, people=()):
     """Higgs STT sometimes mishears the AI's name when it's said to get attention ("Pigs, how should we...",
     "thanks, Hicks.", "Pigs. And what should..."): a word that sounds like it (similar spelling, about as long), as
     the first word (after hey/hi/okay/so) set off by punctuation, or the last one after a comma, becomes the name."""
     from difflib import SequenceMatcher
 
-    def like(w):
-        w = w.lower()
-        return w != ai.lower() and abs(len(w) - len(ai)) <= 2 and SequenceMatcher(None, w, ai.lower()).ratio() >= 0.6
+    def sim(a, b):
+        return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+    def like(w):  # sounds like the AI's name, and not (more) like a person in the call ("Eva" when the AI is "Ava")
+        r = sim(w, ai)
+        return (w.lower() != ai.lower() and abs(len(w) - len(ai)) <= 2 and r >= 0.6
+                and not any(sim(w, p) >= r for p in people))
 
     m = re.match(r"^((?:hey|hi|hello|okay|ok|so|and|um|uh)[,]?\s+)?([A-Za-z']+)(?=[,.!?])", text, re.I)
     if m and like(m.group(2)):
@@ -231,11 +236,11 @@ def fix_name(text, ai):
     return text
 
 
-def prefilter(text, ai, history):
+def prefilter(text, ai, history, people=()):
     """Before judging a transcribed line: (text with a misheard name repaired, kind). kind "skip": nothing to judge
     ("...", or a hum transcribed in another script: "嗯。"); "backchannel": an acknowledgement nobody needs answered
     (unless it answers a question the AI just asked: "Want me to go on?" "Yeah."); None: judge it."""
-    text = fix_name(text, ai)
+    text = fix_name(text, ai, people)
     if not re.search(r"[A-Za-z]", text):
         return text, "skip"
     answers_me = bool(history) and history[-1]["speaker"] == ai and history[-1]["text"].rstrip().endswith("?")
@@ -655,21 +660,24 @@ class ImprovedBrain:
 
     async def on_line(self, li, text, t_end, merge):
         a = self.a
-        text, kind = prefilter(text, a.ai, a.history)
-        if kind == "skip":
-            return
+        if not re.search(r"[A-Za-z]", text):
+            return  # "...", or a hum transcribed in another script ("嗯。")
         if any(time.time() - t0 < 2.0 and slot != li.slot and repeats(text, [x]) for t0, slot, x in self.recent):
             return  # someone's mic picked up another participant (no headphones): ignore the echo
         self.recent.append((time.time(), li.slot, text))
-        if merge and a.history and a.history[-1]["speaker"] == li.name:
+        merged = merge and bool(a.history) and a.history[-1]["speaker"] == li.name
+        if merged:  # they went on after a pause: one line (the transcript panel replaces the fragment)
             text = a.history.pop()["text"] + " " + text
+        text, kind = prefilter(text, a.ai, a.history, a.names())
+        if kind == "skip":
+            return
         context = list(a.history)
         cur = {"speaker": li.name, "text": text}
         a.history.append(cur)
         if kind:  # "mm-hm", "um", "so the, uh,": part of the meeting, but nothing to answer, and it doesn't make a reply
             if kind != "unfinished":  # someone else is waiting for stale; an unfinished line merges with what follows
                 li.gate.settle()
-            await a.line(li.slot, li.name, text, {"speak": False, "why": kind, "decided_s": 0.0})
+            await a.line(li.slot, li.name, text, {"speak": False, "why": kind, "decided_s": 0.0}, merged)
             return
         self.line_no += 1
         line_id = self.line_no
@@ -694,7 +702,7 @@ class ImprovedBrain:
         t_decided = time.perf_counter()
         await a.line(li.slot, li.name, text, {"speak": speak, "why": d["why"], "reading": why, "votes": d["votes"],
                                               "checks": d["checks"],
-                                              "decided_s": round(time.perf_counter() - t_end, 2)})
+                                              "decided_s": round(time.perf_counter() - t_end, 2)}, merged)
         if not speak:
             li.gate.settle()
             if spec:
@@ -905,6 +913,7 @@ class HiggsAgent:
         self.starting = None
         self.gen = 0             # bumped by every launch / switch / stop
         self.errors_t = 0.0      # last ai_error event from a failing tick (rate-limited)
+        self.told_budget = False
         self.avatar = bool(getattr(room, "avatar", False))
 
     def names(self):
@@ -918,9 +927,9 @@ class HiggsAgent:
         await self.room.event({"type": "ai_state", "mode": self.mode, "avatar": getattr(self.room, "avatar", False),
                                "status": s, "calls": CALLS["n"], **kw})
 
-    async def line(self, slot, name, text, decision):
+    async def line(self, slot, name, text, decision, merge=False):
         await self.room.event({"type": "line", "slot": slot, "name": name, "text": text, "decision": decision,
-                               "mode": self.mode})
+                               "mode": self.mode, **({"merge": True} if merge else {})})
 
     def _brain(self, mode):
         return ImprovedBrain(self) if mode == "improved" else DefaultBrain(self)
@@ -1029,6 +1038,10 @@ class HiggsAgent:
         while self.running:
             k += 1
             frames = {slot: self._pop(slot) for slot in list(self.inq)}
+            if CALLS.get("over") and not self.told_budget:
+                self.told_budget = True
+                await self.room.event({"type": "ai_note", "text": f"{self.ai} has used this server's Higgs request budget "
+                                                                  f"(MEET_BUDGET={BUDGET}) and can't answer any more."})
             brain = self.brain
             if brain is not None and brain.dead():  # its Realtime session closed (idle timeout, max duration, network)
                 await self.room.event({"type": "ai_error", "error": "Higgs session closed; reconnecting"})

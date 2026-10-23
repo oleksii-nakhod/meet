@@ -139,7 +139,7 @@ async def main_async(a):
     async def one(c):
         people, ctx, line, want = c
         hist = [{"speaker": s_, "text": t} for s_, t in ctx]
-        text, kind = agent.prefilter(line[1], AI, hist)
+        text, kind = agent.prefilter(line[1], AI, hist, people)
         if kind:  # skipped or a backchannel: the live agent doesn't judge it
             return c, False, {"reading": {"prefilter": kind}}
         r = point(people, ctx, (line[0], text), HACK)

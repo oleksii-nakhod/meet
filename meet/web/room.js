@@ -140,6 +140,7 @@ function onMessage(e) {
   else if (m.type === "ai_gain") mixer.port.postMessage({ gain: Math.max(0, Math.min(1, +m.gain)), slot: 0, ramp: 0.03 });
   else if (m.type === "ai_state") onAiState(m);
   else if (m.type === "line") addLine(m);
+  else if (m.type === "ai_note") toast(m.text, "mode");
   else if (m.type === "ai_say") aiSay(m.text);
   else if (m.type === "lab") lab(m);
 }
@@ -247,6 +248,7 @@ function onAiState(m) {
   const prev = W.ai;
   W.ai = { mode: m.mode ?? prev.mode, avatar: m.avatar ?? prev.avatar, status: m.status ?? prev.status };
   if (m.by && W.ai.mode !== prev.mode) toast(`${m.by} switched ${aiName} to ${MODE_LABEL[W.ai.mode]}`, "mode");
+  if (W.ai.status === "connecting" && prev.status !== "connecting") toast(`Connecting ${aiName} to Higgs…`, "mode");
   if (m.by && W.ai.avatar !== prev.avatar) toast(`${m.by} turned ${aiName}'s avatar ${W.ai.avatar ? "on" : "off"}`, "mode");
   const sw = $("modesw");
   sw.setAttribute("aria-checked", String(W.ai.mode === "improved"));
@@ -271,11 +273,12 @@ function aiSay(text) {
 }
 
 // ---------- side panel ----------
-function addItem(list, cls, who, text, extra) {
+function addItem(list, cls, who, text, extra, slot) {
   const ul = $(list);
   ul.querySelector(".empty")?.remove();
   const li = document.createElement("li");
   li.className = cls;
+  if (slot !== undefined && slot !== null) li.dataset.slot = String(slot);
   const w = document.createElement("div"); w.className = "who"; w.textContent = who;
   const x = document.createElement("div"); x.textContent = text;
   li.append(w, x);
@@ -299,7 +302,11 @@ function addLine(m) {
     const rest = Object.entries(d).filter(([k]) => k !== "speak" && k !== "why").map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`);
     extra.append(c, [d.why, ...rest].filter(Boolean).join(" · "));
   }
-  addItem("lines", m.slot === 0 ? "ai" : "", m.name || "", m.text, extra);
+  if (m.merge) {  // the same person went on after a pause: their last line becomes the whole line
+    const prev = [...$("lines").querySelectorAll("li")].reverse().find((x) => x.dataset.slot === String(m.slot));
+    if (prev) prev.remove();
+  }
+  addItem("lines", m.slot === 0 ? "ai" : "", m.name || "", m.text, extra, m.slot);
 }
 
 // ---------- video socket ----------
