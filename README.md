@@ -21,4 +21,4 @@ Boson AI hackathon 2026. Full write-up, results and test commands: [`meet/README
 `meet/README.md` refers to `./run.sh meet`; that is `cd meet && python server.py --port 8600` above.
 `meet/public.sh` (public trycloudflare link) expects the venv at `../.venv` relative to this repo.
 
-Tests without API calls: `cd meet && python -m pytest tests/test_floor.py tests/test_agent_rules.py`.
+Tests without API calls (the key only has to be set, any value): `cd meet && BOSON_API_KEY=x python -m pytest tests/test_floor.py tests/test_agent_rules.py`.
