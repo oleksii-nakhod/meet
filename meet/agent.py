@@ -25,7 +25,7 @@ from scipy.signal import resample_poly
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "mmhm"))
-sys.path.insert(0, os.path.join(HERE, "..", "third_voice"))
+sys.path.insert(0, os.path.join(HERE, "..", "third_voice"))  # tv_eval, retrieve
 from mmhm.engine import INCOMPLETE, N, TICK, Engine, Policy, VAD  # noqa: E402
 from mmhm.expressive import SentenceSpeaker  # noqa: E402
 from mmhm.higgs import SR, Session  # noqa: E402
@@ -60,6 +60,17 @@ REPLY_SYS = ("You are {ai}, an AI participant with a voice in an online meeting 
              "states something that contradicts what you know (a wrong day, time, number, place, dose or rule), start by "
              "correcting it plainly. Otherwise say what a helpful teammate would say: one or two short spoken sentences, "
              "no lists, no preamble.")  # third_voice/live_demo.py's writer, "group conversation" -> "online meeting"
+# v2 (2026-10-23, tests/writer_cases.py): v1 recited the fact sheet unprompted ("How's it going?" -> "...the deadline is
+# Saturday at 3 pm"), carried on with its old answer after being interrupted, and promised work it can't do.
+REPLY_SYS2 = ("You are {ai}, an AI participant with a voice in an online meeting ({setting}) with {people}. "
+              "What you know: {facts} You decided to speak up after the latest utterance. Reply to the latest "
+              "utterance itself. If it states something that contradicts what you know (a wrong day, time, number, place, "
+              "dose or rule), start by correcting it plainly. Bring up what you know only when it answers or corrects the "
+              "latest utterance, and don't repeat what was already said. A turn of yours marked [interrupted] was cut "
+              "off: answer what the person who interrupted said (if they only want to speak, say something like "
+              "\"Sure, go ahead.\"), and don't go back to it unless asked. You can answer, remind, summarize and "
+              "suggest, but you can't do work outside the call, so don't volunteer for tasks. Say what a helpful "
+              "teammate would say: one or two short spoken sentences, under 30 words, no lists, no preamble.")
 PERSONA = ("You are {ai}, an AI participant with a voice in an online meeting ({setting}) with {people}. "
            "What you know: {facts} Keep each reply to one or two short spoken sentences.")
 
@@ -233,6 +244,9 @@ def fix_name(text, ai, people=()):
     m = re.search(r",\s*([A-Za-z']+)([.?!]*)\s*$", text)
     if m and like(m.group(1)):
         text = text[:m.start(1)] + ai + text[m.end(1):]
+    w = re.findall(r"[A-Za-z']+", text)
+    if 2 <= len(w) <= 3 and like(w[0]) and text.lstrip().startswith(w[0]):  # "Pigs stop."
+        text = text.replace(w[0], ai, 1)
     return text
 
 
@@ -243,6 +257,9 @@ def prefilter(text, ai, history, people=()):
     text = fix_name(text, ai, people)
     if not re.search(r"[A-Za-z]", text):
         return text, "skip"
+    bare = re.sub(rf"^{re.escape(ai)}[,.!]?\s*|[,.!]?\s*{re.escape(ai)}[.!]*$", "", text.strip(), flags=re.I)
+    if STOP_ASK.match(bare):
+        return text, "stop"  # "Higgs, stop.", "hold on": wants quiet, not an answer (barge-in already stopped it)
     answers_me = bool(history) and history[-1]["speaker"] == ai and history[-1]["text"].rstrip().endswith("?")
     if backchannel(text) and not answers_me:
         return text, "backchannel"
@@ -256,7 +273,20 @@ def prefilter(text, ai, history, people=()):
 
 REPEAT_ASK = re.compile(r"\b(say (that|it) again|repeat (that|it|yourself)|come again|what did you (just )?say|"
                         r"(didn't|did not|couldn't) (catch|hear|get) (that|it|you)|pardon)\b", re.I)
-HEDGE_S = 0.5  # a draft still not done this long after the decision gets a second, identical request; first one wins
+VOLUNTEERS = re.compile(r"\bI(?:'ll| will| can| could)\s+(?:handle|take care of|take on|work on|do the|build|code|"
+                        r"implement|set up|write the|own the)\b", re.I)
+STOP_ASK = re.compile(r"^(?:(?:ok(?:ay)?|hey|um|uh)[,.]?\s+)?(?:stop(?: talking)?|wait|hold on|hang on|shh+|quiet|be quiet|"
+                      r"enough|one (?:sec|second|moment))[.!]*$", re.I)
+WRITER = REPLY_SYS2
+HEDGE_S = 0.5
+
+
+def facts_relevant(text, context, facts, names):
+    """Does the line (or the two turns before it) share a content word with the fact sheet? Names don't count."""
+    import retrieve
+    q = retrieve.toks(" ".join([t["text"] for t in context] + [text])) - retrieve.toks(" ".join(names))
+    f = retrieve.toks(" ".join(facts)) - retrieve.toks(" ".join(names))
+    return bool(q & f)  # a draft still not done this long after the decision gets a second, identical request; first one wins
 
 
 async def hedged(task, again, delay):
@@ -614,9 +644,13 @@ class ImprovedBrain:
         old, p = self.pools, self.point()
         self.pools = {"judge": Pool(judge_prompt(p, PROMPT)[0], SAMPLES),
                       "check": Pool(tv_eval.fact_prompt(p)[0], SAMPLES),
-                      "write": Pool(REPLY_SYS.format(ai=p["target_speaker"], setting=p["setting"],
-                                                     people=", ".join(p["people"]) or "the group",
-                                                     facts=" ".join(p["facts"])), 2)}
+                      "write": Pool(WRITER.format(ai=p["target_speaker"], setting=p["setting"],
+                                                  people=", ".join(p["people"]) or "the group",
+                                                  facts=" ".join(p["facts"])), 2),
+                      # small talk / greetings get a writer without the fact sheet: it recited it otherwise
+                      "write0": Pool(WRITER.format(ai=p["target_speaker"], setting=p["setting"],
+                                                   people=", ".join(p["people"]) or "the group",
+                                                   facts="nothing specific beyond general knowledge."), 1)}
         if old:
             for pool in old.values():
                 await pool.close()
@@ -694,7 +728,8 @@ class ImprovedBrain:
         spec = None
         if SPECULATE and (len(self.listeners) == 1 or a.ai.lower() in text.lower() or text.rstrip().endswith("?")):
             spec = Reply(line_id, li, text, None, t_end)
-        draft = asyncio.ensure_future(pools["write"].ask(convo, retries=1, on_delta=spec.feed if spec else None))
+        writer = pools["write"] if facts_relevant(text, context[-2:], a.facts, [a.ai] + a.names()) else pools["write0"]
+        draft = asyncio.ensure_future(writer.ask(convo, retries=1, on_delta=spec.feed if spec else None))
         # both drafts start with the decision, so a correction costs no extra wait (rewriting it after: ~1 s)
         cdraft = asyncio.ensure_future(pools["write"].ask(CORRECT.format(ai=a.ai) + convo, retries=1)) if a.facts else None
         speak, d = await decide(r, lambda kind, _sys, user, _i: pools[kind].ask(user), prompt=PROMPT)
@@ -720,8 +755,17 @@ class ImprovedBrain:
                 spec = None
         if cdraft:
             cdraft.add_done_callback(lambda f: f.exception())
-        ans = (await hedged(draft, lambda: pools["write"].ask(convo_used, retries=0), HEDGE_S)).strip().strip('"')
+        if convo_used is not convo:
+            writer = pools["write"]
+        ans = (await hedged(draft, lambda: writer.ask(convo_used, retries=0), HEDGE_S)).strip().strip('"')
         t_draft = time.perf_counter()
+        if VOLUNTEERS.search(ans):  # "I can handle the backend": it's an AI in a call, it can't
+            if spec:
+                spec.speaker.cancel()
+                spec = None
+            ans = (await writer.ask("[You are an AI in this call and can't do work outside it (coding, building, "
+                                    "booking): don't volunteer for tasks.]\n" + convo_used, retries=1)).strip().strip('"') or ans
+            t_draft = time.perf_counter()
         if spec and (not ans or spec.text.strip().strip('"') != ans):  # the stream failed and a retry answered
             spec.speaker.cancel()
             spec = None
@@ -732,7 +776,7 @@ class ImprovedBrain:
             if spec:
                 spec.speaker.cancel()
                 spec = None
-            ans = (await pools["write"].ask("[You already said that. Reply to the latest utterance with something new, "
+            ans = (await writer.ask("[You already said that. Reply to the latest utterance with something new, "
                                             "briefly.]\n" + convo, retries=1)).strip().strip('"')
             t_draft = time.perf_counter()
         skip = ("no draft (Higgs request failed)" if not ans else "repeat" if repeats(ans, mine)
@@ -856,7 +900,8 @@ class ImprovedBrain:
             await self.a.room.avatar_stop()
         heard = floor.truncate(r.text, [(a / SR, b / SR, x) for a, b, x in r.speaker.segments], r.pos / SR)
         if r.hist_idx is not None and r.hist_idx < len(self.a.history):
-            self.a.history[r.hist_idx]["text"] = heard
+            # marked, so the judge and the writer know it was cut off (unmarked, the writer resumed its old answer)
+            self.a.history[r.hist_idx]["text"] = f"{heard} [interrupted]"
         self.playing = None
         self.gain = 1.0
         await self.a.room.ai_flush()

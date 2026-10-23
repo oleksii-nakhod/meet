@@ -30,8 +30,22 @@ def test_prefilter():
     assert pf("Yeah?") is None
     assert pf("um") == "filler" and pf("so the, uh, the") == "filler"
     assert pf("so basically what i'm trying to") == "unfinished"
+    assert pf("Higgs, stop.") == "stop" and pf("Pigs stop.") == "stop" and pf("Hold on.") == "stop"
+    assert pf("Stop sharing your screen, Priya.") is None
     for t in ("Go on.", "Tell me more about that.", "what do you mean by that", "Hey, Higgs.", "Okay, thanks."):
         assert pf(t) is None, t
+
+
+def test_facts_relevant():
+    facts = ["Submissions close Saturday at 3 pm.", "The project is a video call where Higgs joins."]
+    assert agent.facts_relevant("When do submissions close?", [], facts, ["Higgs", "Alex"])
+    assert not agent.facts_relevant("How's it going?", [], facts, ["Higgs", "Alex"])
+    assert not agent.facts_relevant("Higgs, are you there?", [], facts, ["Higgs", "Alex"])
+
+
+def test_volunteers():
+    assert agent.VOLUNTEERS.search("I can handle the backend integration.")
+    assert not agent.VOLUNTEERS.search("You could handle the backend; I can remind you of the deadline.")
 
 
 def test_rule_v5():
