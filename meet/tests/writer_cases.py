@@ -50,7 +50,7 @@ async def main_async(a):
         sys_ = sys_t.format(ai=H, setting="hackathon team meeting", people=", ".join(people), facts=" ".join(HACK))
         c = "\n".join(f"{s}: {t}" for s, t in ctx)
         async with sem:
-            return await tv_eval.ask_higgs(sys_, f"Conversation so far:\n{c}\n{line[0]}: {line[1]}\n\nYour reply:")
+            return await tv_eval.ask_higgs(sys_, f"Conversation so far:\n{c}\n{line[0]}: {line[1]}\n\nReply as {H}:")
     vers = {"v1": V1, "v2": V2}
     for people, ctx, line, want in CASES:
         outs = await asyncio.gather(*[one(vers[v], people, ctx, line) for v in a.versions for _ in range(a.n)])

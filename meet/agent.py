@@ -178,7 +178,8 @@ def judge_rule(d, r, prompt="v4b"):
     if who:
         to = "person"  # "Alex, I can barely hear you.": said to Alex, however the judge read it
     if (to == "me" and len(r["people"]) > 1 and r["target_speaker"].lower() not in cur.lower()
-            and not any(t["speaker"] == r["target_speaker"] for t in ctx[-2:])):
+            and not any(t["speaker"] == r["target_speaker"] for t in ctx[-2:])
+            and not named_ai_before(ctx, r["current_turn"]["speaker"], r["target_speaker"])):
         to = "group"  # in a group "you" is nearly always a person (AMI: "makes sense for you to take it from here")
     if (to == "group" and d.get("ask") is True and ctx and ctx[-1]["speaker"] == r["target_speaker"]
             and len(re.findall(r"[A-Za-z']+", cur)) <= 4 and not any(p.lower() in cur.lower() for p in r["people"])):
@@ -388,6 +389,12 @@ def first_sentence(text, complete_only=False):
 
 
 VOCATIVE_WAIT = 0.9  # silence after a line that only calls the AI before answering it
+
+
+def named_ai_before(ctx, speaker, ai, n=2):
+    """Did this speaker name the AI in one of the last n turns? ("Assistant, you caught all that? [pause] Set us both
+    up for tomorrow...": the request comes in a second piece, without the name.)"""
+    return any(t["speaker"] == speaker and re.search(rf"\b{re.escape(ai)}\b", t["text"], re.I) for t in ctx[-n:])
 
 
 def vocative_person(text, people, ai):
@@ -971,8 +978,9 @@ class ImprovedBrain:
             r["facts"] = retrieve.top_facts(r, 8)
         pools = self.pools
         ctx = "\n".join(f"{t['speaker']}: {t['text']}" for t in context[-14:])
-        convo = f"Conversation so far:\n{ctx}\n{li.name}: {text}\n\nYour reply:"
-        addressed = len(self.listeners) == 1 or re.search(rf"\b{re.escape(a.ai)}\b", text, re.I) is not None
+        convo = f"Conversation so far:\n{ctx}\n{li.name}: {text}\n\nReply as {a.ai}:"  # "Your reply:" was continued as a person
+        addressed = (len(self.listeners) == 1 or re.search(rf"\b{re.escape(a.ai)}\b", text, re.I) is not None
+                     or named_ai_before(context, li.name, a.ai))
         if a.avatar:  # the face renders only once the whole reply is spoken, and TTS takes about as long as the speech
             convo = "[Answer in one short sentence of at most 12 words.]\n" + convo
         # Likely a reply (a one-to-one call, the AI's name, a question): voice the draft while it streams in and the
