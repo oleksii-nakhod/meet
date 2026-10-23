@@ -1160,8 +1160,12 @@ class ImprovedBrain:
                 if not r.started:
                     r.marks.setdefault("filler", time.perf_counter())
                 return out
-            r.filler, r.filler_done = None, True
-            await self._release(r)
+            r.filler, r.filler_done = None, True  # the answer is released once the room is quiet again (below)
+        if r is not None and r.filler_done and not r.released and r.filler is None:
+            # after "Hmm." people may take the floor (the pause invites it): start the answer only in a 0.35 s gap
+            quiet = not anyone and (self.voice_at == 0.0 or time.perf_counter() - self.voice_at >= FLOOR_POLICY.min_silence)
+            if quiet:
+                await self._release(r)
         if r is not None and not r.video:
             taker = next((li for li in self.listeners.values() if li.run >= FLOOR_POLICY.interrupt_max), None)
             if taker or self.moved_on(r):  # someone took the floor while the face rendered (a "mm" doesn't)

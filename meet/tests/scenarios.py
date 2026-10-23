@@ -304,8 +304,11 @@ def gaps(b, since, min_gap=0.15):
     return [round(y - x, 2) for x, y in zip(ts, ts[1:]) if y - x > min_gap]
 
 
+QUIET_EXTRA = {"s": 0.0}  # avatar scenes: "Hmm." then ~2 s of render before the answer: wait it out between steps
+
+
 async def wait_quiet(b, quiet=0.8, timeout=25):
-    await b.wait_ai_quiet(quiet, timeout)
+    await b.wait_ai_quiet(quiet + QUIET_EXTRA["s"], timeout)
 
 
 VOICE_OVERRIDE = {}  # set per scenario (sc["voices"]): accents from the voice library
@@ -453,6 +456,7 @@ async def run_step(step, bots_, ear, mode):
 
 async def run_scenario(base, sc, mode, outdir):
     people = sc["people"]
+    QUIET_EXTRA["s"] = 1.5 if sc.get("avatar") else 0.0
     VOICE_OVERRIDE.clear()
     VOICE_OVERRIDE.update(sc.get("voices", {}))
     rid = create_room(base, ADMIN, title=sc["name"], ai=sc.get("ai", "Higgs"), setting=sc.get("setting", SET),
