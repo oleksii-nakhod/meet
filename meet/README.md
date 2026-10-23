@@ -98,6 +98,22 @@ Env: `MEET_SAMPLES` (judge samples per line; default 1 in a one-to-one call, 3 w
 (2 preloaded turn-taking model processes), `MEET_SIGNALS=0` (no per-person turn-taking models: timing falls back to
 silence rules), `MEET_VOICE`.
 
+## Running it for real (2026-10-23 notes)
+
+- **Restart the server** after pulling changes (`./run.sh meet` / `./run.sh meet-public`): a running server keeps the
+  code it started with.
+- **Machine:** each person in an improved-mode room has a turn-taking model process (~0.7 CPU core, ~620 MB RAM);
+  the server keeps 2 preloaded (`MEET_SPARE_SIGNALS`). Three 3-person rooms on one server ran at 2–3 ms per room tick.
+- **Higgs sessions:** an improved room holds ~4 standing sessions (one-to-one) or ~9 (group) plus one per person;
+  the API key took 120 concurrent sessions in a test without refusal. Every request is counted against
+  `MEET_BUDGET` (30000 per server run; the room is told when it runs out).
+- **Echo:** headphones are best. Without them, Higgs ignores its own voice coming back up to 25 dB below what it
+  plays (a typical echo canceller leaves less than that).
+- **Showing default vs improved live:** default Higgs is reliably derailed by a clear "yeah" or "uh-huh" while it
+  talks (it stops and answers the backchannel), by a mid-sentence thinking pause (it talks over it), and by people
+  talking to each other (it answers them). A soft hummed "mm" often doesn't trigger its voice detector at all.
+- **Avatar:** replies are one sentence; the face says "Hmm." ~2.4 s after the line and the answer follows ~2 s later.
+
 ## Rooms
 
 `/` creates a room (title, AI name, setting, facts, optional passcode) and gives a link `/r/<id>?k=<passcode>`; the
