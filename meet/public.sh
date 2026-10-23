@@ -3,7 +3,7 @@
 # no account; mic and camera work because it's HTTPS). Anyone with a room link + passcode can join and use Higgs on
 # your API key, so share room links only with people you trust; creating rooms needs the admin token printed below.
 #   ./public.sh            (Ctrl-C stops both)
-# Env: MEET_ADMIN (default: a random token), MEET_BUDGET (Higgs requests per server run, default 5000),
+# Env: MEET_ADMIN (default: a random token), MEET_BUDGET (Higgs requests per server run, default 30000),
 #      CLOUDFLARED (default ~/.local/opt/cloudflared/cloudflared).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -25,4 +25,12 @@ echo
 echo "  Create a room:  $URL/?admin=$MEET_ADMIN"
 echo "  (then share the room link it gives you; the admin link is only for you)"
 echo
-wait $SRV
+# Quick tunnels can be dropped by Cloudflare ("Tunnel not found", 2026-10-23 03:37): if either side stops, say so and
+# stop the other, rather than leaving a server nobody can reach.
+set +e
+wait -n $SRV $CFP
+if ! kill -0 $CFP 2>/dev/null; then
+  echo "the tunnel stopped (see out/cloudflared.log); run ./run.sh meet-public again for a new link" >&2
+else
+  echo "the server stopped" >&2
+fi
