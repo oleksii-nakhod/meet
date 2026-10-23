@@ -40,6 +40,84 @@ HACK = ["The demo video must be 2 to 3 minutes and show the project running.", "
 SET = "hackathon team meeting"
 LONG_Q = "Higgs, can you explain in a few sentences how we should structure the demo video?"
 
+FAMILY = ["The flight to Lisbon leaves Friday, June 12 at 7:40 am from JFK terminal 1.",
+          "The hotel is Casa Azul; check-in is from 3 pm; it is booked for 4 nights.",
+          "Grandma's wheelchair assistance at the airport is booked."]
+STANDUP = ["Release 4.2 code freeze is Wednesday at 5 pm.", "PAY-418 (webhook retries) is 8 points and owned by Dev.",
+           "Staging is down for maintenance until 2 pm today."]
+STUDY = ["The exam is Thursday at 9 am in room B204.", "It covers chapters 4 to 7.", "Calculators are not allowed."]
+MONO = ("So yesterday we tested the call with three people and the audio was fine, but the avatar was slow, about four "
+        "seconds, and Priya thought it looked a bit uncanny, so I think we should maybe drop it from the demo, but I'm "
+        "not sure. Higgs, what's your take?")
+
+SCENARIOS2 = [
+    dict(name="nova_1to1", ai="Nova", setting="family trip planning call", facts=FAMILY, people=["Alex"], steps=[
+        ("say", "Alex", "Hi Nova.", "reply"),
+        ("say", "Alex", "When does our flight leave?", "reply"),
+        ("say", "Alex", "And is grandma's wheelchair sorted?", "reply")]),
+    dict(name="max_standup", ai="Max", setting="engineering standup", facts=STANDUP, people=["Priya", "Sam"], steps=[
+        ("say", "Priya", "Max, is staging back up yet?", "reply"),
+        ("say", "Priya", "Sam, can you take PAY-418?", "silent"),
+        ("say", "Sam", "Sure, I'll pick it up after lunch.", "silent"),
+        ("say", "Sam", "Wait, is code freeze Thursday?", "reply")]),
+    dict(name="study_group", setting="study group for a biology exam", facts=STUDY, people=["Alex", "Mei"], steps=[
+        ("say", "Alex", "Does anyone know which chapters are on the exam?", "reply"),
+        ("say", "Mei", "I think it's chapters four to six.", "reply"),
+        ("say", "Alex", "Mei, do you want to meet tomorrow to review?", "silent"),
+        ("say", "Mei", "Yeah, let's do the library at six.", "silent")]),
+    dict(name="stop_1to1", people=["Alex"], steps=[
+        ("talk_over", "Alex", LONG_Q, ("Alex", "Higgs, stop."), "stop"),
+        ("await", "silent", 4.0),
+        ("say", "Alex", "Okay. Let's move on to the budget.", "any")]),
+    dict(name="quiet_please", people=["Alex", "Priya"], steps=[
+        ("say", "Alex", "Higgs, please stay quiet for a bit, we need to talk among ourselves.", "any"),
+        ("say", "Alex", "Priya, what do you think about the logo?", "silent"),
+        ("say", "Priya", "Honestly, I'd go with the blue one.", "silent"),
+        ("say", "Alex", "Okay, Higgs, you can jump back in. When do submissions close?", "reply")]),
+    dict(name="human_first", people=["Alex", "Priya", "Sam"], steps=[
+        ("say", "Alex", "When do submissions close again?", "any", {"window": 0.3}),
+        ("say", "Priya", "Saturday at three.", "silent", {"gap": 0.3}),
+        ("say", "Alex", "Right, thanks Priya.", "silent")]),
+    dict(name="corrected_1to1", people=["Alex"], steps=[
+        ("say", "Alex", "Higgs, how long can the video be?", "reply"),
+        ("say", "Alex", "No, that's wrong, it's actually four minutes.", "reply")]),
+    dict(name="repeat_1to1", people=["Alex"], steps=[
+        ("say", "Alex", "Higgs, what are the judging criteria?", "reply"),
+        ("say", "Alex", "Sorry, can you say that again?", "reply")]),
+    dict(name="monologue", people=["Alex", "Priya"], steps=[
+        ("say", "Alex", MONO, "reply")]),
+    dict(name="late_join", people=["Alex"], steps=[
+        ("say", "Alex", "Higgs, let's plan the demo video. What should come first?", "reply"),
+        ("join", "Priya", 5.0),
+        ("say", "Priya", "Hi everyone, sorry I'm late. Higgs, what did I miss?", "reply"),
+        ("say", "Alex", "Priya, can you do the voice-over?", "silent")]),
+    dict(name="cut_in_question", people=["Alex", "Sam"], steps=[
+        ("talk_over", "Alex", LONG_Q, ("Sam", "Sorry to cut in, Higgs, but how long is the video allowed to be?"), "stop"),
+        ("await", "reply", 6.0)]),
+    dict(name="chat_group", people=["Alex", "Priya"], steps=[
+        ("chat", "Priya", "Higgs, can you remind us of the deadline?", "reply"),
+        ("chat", "Alex", "lol ok", "silent")]),
+    dict(name="noisy_mic", people=["Alex", "Priya"], noise={"Alex": -42.0}, steps=[
+        ("say", "Alex", "Hey Higgs, can you hear me over the noise?", "reply"),
+        ("say", "Priya", "Alex, your mic is a bit noisy.", "silent"),
+        ("say", "Alex", "Higgs, when do submissions close?", "reply")]),
+    dict(name="echo_leak", people=["Alex", "Priya"], echo={"Alex": 0.03, "Priya": 0.03}, steps=[
+        ("say", "Alex", LONG_Q, "reply", {"no_stop": True}),
+        ("say", "Priya", "Higgs, and what should the last thirty seconds show?", "reply", {"no_stop": True})]),
+    dict(name="soft_barge", people=["Alex", "Priya"], steps=[
+        ("talk_over", "Alex", LONG_Q, ("Priya", {"ami": "int_03.wav", "gain_db": -6}), "stop"),
+        ("talk_over", "Priya", "Higgs, what's the riskiest part of our plan?", ("Alex", {"ami": "int_07.wav", "gain_db": -6}), "stop")]),
+    dict(name="soft_bc", people=["Alex", "Priya"], steps=[
+        ("talk_over", "Alex", LONG_Q, ("Priya", {"ami": "bc_02.wav", "gain_db": -10}), "continue"),
+        ("talk_over", "Priya", "Higgs, what's the riskiest part of our plan?", ("Alex", {"ami": "bc_06.wav", "gain_db": -10}), "continue")]),
+    dict(name="rapid_chat", people=["Alex", "Priya", "Sam"], steps=[
+        ("say", "Alex", "Did anyone eat yet?", "silent", {"gap": 0.3}),
+        ("say", "Priya", "Not yet, I'm starving.", "silent", {"gap": 0.3}),
+        ("say", "Sam", "Pizza again?", "silent", {"gap": 0.3}),
+        ("say", "Alex", "Sure, I'll order.", "silent", {"gap": 0.3}),
+        ("say", "Priya", "Get the vegetarian one too.", "silent", {"gap": 0.3})]),
+]
+
 SCENARIOS = [
     # ---------------- one person and Higgs ----------------
     dict(name="greet_1to1", people=["Alex"], steps=[
@@ -151,6 +229,13 @@ def window_events(b, t0, t1):
     return {"lines": lines, "ai_say": says, "states": states, "flush": flushes, "errors": errors}
 
 
+def gaps(b, since, min_gap=0.15):
+    """Silences inside Higgs's audio stream after `since` (frames are sent only while it talks, so a gap between frames
+    longer than a tick is an underrun: the next sentence's speech wasn't ready)."""
+    ts = [t for t, _ in b.ai_frames if t >= since]
+    return [round(y - x, 2) for x, y in zip(ts, ts[1:]) if y - x > min_gap]
+
+
 async def wait_quiet(b, quiet=0.8, timeout=25):
     await b.wait_ai_quiet(quiet, timeout)
 
@@ -182,6 +267,10 @@ async def run_step(step, bots_, ear, mode):
         on = [o for o in ear.ai_onsets(t_start) if o[0] <= t_end + win]
         cut_in = [o for o in on if o[0] < t_end - 0.1]
         got = "reply" if on else "silent"
+        if on and expect == "reply" and opts.get("no_stop"):  # nobody spoke during the reply: it must not stop
+            await wait_quiet(ear, 1.0)
+            if any(m.get("stopped") for t, m in ear.evs("ai_state", t_start)):
+                got = "stopped by itself"
         ok = expect == "any" or got == expect
         if cut_in:
             ok = False
@@ -189,7 +278,8 @@ async def run_step(step, bots_, ear, mode):
         row.update(who=who, said=text_of(sp), expect=expect, got=got, ok=ok,
                    latency=round(on[0][0] - t_end, 2) if on else None)
         if on:
-            await wait_quiet(ear, 1.0)
+            await wait_quiet(ear, 1.5)
+            row["gaps"] = gaps(ear, on[0][0])
         await asyncio.sleep(0.5)  # late events (a decision) belong to this step
         row.update(window_events(ear, t_start, ear.now()))
         return row
@@ -236,6 +326,7 @@ async def run_step(step, bots_, ear, mode):
             return row
         t_c = b2.now()
         t_c_end = await b2.say(pcm2)
+        ear.mark = t_c_end  # an "await" step right after looks from here
         await asyncio.sleep(2.5)
         # stopped = a flush after the cue started, or Higgs's first reply ended within 1.5 s of the cue's end while a
         # stop was announced
@@ -253,6 +344,24 @@ async def run_step(step, bots_, ear, mode):
         await asyncio.sleep(0.5)
         row.update(window_events(ear, t_start, ear.now()))
         return row
+    if kind == "join":  # someone joins mid-call
+        b = Bot(ear.base, ear.room, step[1])
+        bots_[step[1]] = b
+        await b.join()
+        await asyncio.sleep(step[2] if len(step) > 2 else 4.0)
+        return None
+    if kind == "await":  # after the previous step: does Higgs speak (again) within the window?
+        _, expect, win = step
+        t0 = getattr(ear, "mark", None) or ear.now()
+        ear.mark = None
+        on = await ear.wait_ai(max(0.1, t0 + win - ear.now()), since=t0 + 0.2)
+        got = "reply" if on else "silent"
+        row.update(said="(waiting)", expect=expect, got=got, ok=expect == "any" or got == expect,
+                   latency=round(on - t0, 2) if on else None)
+        if on:
+            await wait_quiet(ear, 1.0)
+        row.update(window_events(ear, t0, ear.now()))
+        return row
     raise ValueError(kind)
 
 
@@ -260,7 +369,8 @@ async def run_scenario(base, sc, mode, outdir):
     people = sc["people"]
     rid = create_room(base, ADMIN, title=sc["name"], ai=sc.get("ai", "Higgs"), setting=sc.get("setting", SET),
                       facts=sc.get("facts", HACK))
-    bs = {p: Bot(base, rid, p, echo=sc.get("echo", 0.0)) for p in people}
+    bs = {p: Bot(base, rid, p, echo=sc.get("echo", {}).get(p, 0.0), noise_db=sc.get("noise", {}).get(p, -70.0))
+          for p in people}
     for b in bs.values():
         await b.join()
         await asyncio.sleep(0.2)
@@ -327,7 +437,8 @@ def short(r):
 async def main_async(a):
     outdir = os.path.join(MEET, "out", "scen", a.tag)
     os.makedirs(outdir, exist_ok=True)
-    todo = [(sc, m) for sc in SCENARIOS if not a.only or sc["name"] in a.only for m in a.modes
+    pool = {"1": SCENARIOS, "2": SCENARIOS2, "all": SCENARIOS + SCENARIOS2}[a.set]
+    todo = [(sc, m) for sc in pool if not a.only or sc["name"] in a.only for m in a.modes
             if m in sc.get("modes", ("default", "improved"))]
     # warm the TTS cache first (parallel, outside the timed part)
     texts = set()
@@ -377,6 +488,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--modes", nargs="+", default=["improved", "default"])
     ap.add_argument("--only", nargs="*")
+    ap.add_argument("--set", default="1", choices=["1", "2", "all"])
     ap.add_argument("--par", type=int, default=4)
     ap.add_argument("--port", type=int, default=8641)
     ap.add_argument("--samples", type=int, default=3)

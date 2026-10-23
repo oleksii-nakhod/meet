@@ -27,6 +27,7 @@ CLIPS = os.path.join(MEET, "out", "clips")
 AMI = os.path.join(MEET, "..", "mmhm", "out", "ami_cues")
 N = 480
 AI_RMS = 150  # slot-0 frame louder than this counts as Higgs speaking
+T0 = time.perf_counter()  # one clock for every bot, so times from different participants compare (late joiners)
 
 
 def clip(text, voice="marcus", gain_db=0.0, **extra):
@@ -86,7 +87,7 @@ class Bot:
         self.ws = None
         self.tasks = []
         self.speaking_until = 0.0
-        self.t0 = time.perf_counter()
+        self.t0 = T0
 
     def now(self):
         return time.perf_counter() - self.t0

@@ -214,15 +214,15 @@ def backchannel(text):
 
 def fix_name(text, ai):
     """Higgs STT sometimes mishears the AI's name when it's said to get attention ("Pigs, how should we...",
-    "thanks, Hicks."): a word that sounds like it (similar spelling, about as long), as the first word (after
-    hey/hi/okay/so) or the last one, set off by a comma, becomes the name."""
+    "thanks, Hicks.", "Pigs. And what should..."): a word that sounds like it (similar spelling, about as long), as
+    the first word (after hey/hi/okay/so) set off by punctuation, or the last one after a comma, becomes the name."""
     from difflib import SequenceMatcher
 
     def like(w):
         w = w.lower()
         return w != ai.lower() and abs(len(w) - len(ai)) <= 2 and SequenceMatcher(None, w, ai.lower()).ratio() >= 0.6
 
-    m = re.match(r"^((?:hey|hi|hello|okay|ok|so|and|um|uh)[,]?\s+)?([A-Za-z']+)(?=,)", text, re.I)
+    m = re.match(r"^((?:hey|hi|hello|okay|ok|so|and|um|uh)[,]?\s+)?([A-Za-z']+)(?=[,.!?])", text, re.I)
     if m and like(m.group(2)):
         text = text[:m.start(2)] + ai + text[m.end(2):]
     m = re.search(r",\s*([A-Za-z']+)([.?!]*)\s*$", text)
@@ -249,6 +249,8 @@ def prefilter(text, ai, history):
     return text, None
 
 
+REPEAT_ASK = re.compile(r"\b(say (that|it) again|repeat (that|it|yourself)|come again|what did you (just )?say|"
+                        r"(didn't|did not|couldn't) (catch|hear|get) (that|it|you)|pardon)\b", re.I)
 HEDGE_S = 0.5  # a draft still not done this long after the decision gets a second, identical request; first one wins
 
 
@@ -268,6 +270,14 @@ async def hedged(task, again, delay):
                     p.add_done_callback(lambda f: f.exception())
                 return t.result()
     return ""
+
+
+ECHO_DB = float(os.environ.get("MEET_ECHO_DB", "25"))  # quieter than Higgs's output by this much while it talks: echo
+
+
+def frame_db(pcm):
+    x = pcm.astype(np.float32) / 32768
+    return float(20 * np.log10(np.sqrt(np.mean(x * x)) + 1e-9))
 
 
 def to16(pcm):
@@ -410,6 +420,7 @@ class Listener:
         self.preroll, self.streaming, self.sent = deque(maxlen=10), False, 0
         self.merge = False       # they resumed right after a commit: join the next piece to the last line
         self.signals = None
+        self.db, self.echo_frames = -90.0, 0
         self.session, self.open, self.stopped = None, False, False
         self.backlog = []        # audio to send once a (re)opened transcription session is up
         self.commit_waiting = None  # a line ended while the session was down: commit it after the backlog
@@ -482,8 +493,14 @@ class Listener:
             self.backlog.append(pcm)
         self._reopen()
 
-    async def tick(self, t, pcm, others):
-        self.speaking, _ = self.vad(pcm)
+    async def tick(self, t, pcm, others, echo_db=None):
+        """echo_db: Higgs's loudest recent output frame (dBFS) while it talks, else None. A sound from this person more
+        than ECHO_DB below it is Higgs's own voice coming back through their speakers (a leaky echo canceller), not
+        them: it neither interrupts Higgs nor becomes a line."""
+        self.speaking, self.db = self.vad(pcm)
+        if self.speaking and echo_db is not None and self.db < echo_db - ECHO_DB:
+            self.speaking = False
+            self.echo_frames += 1
         if self.signals is not None and self.signals.ready.is_set():
             u16 = to16(pcm) * (1.0 if self.speaking else 0.05)  # noise gate, as in engine.tick
             sig = self.signals.push(u16, to16(others))
@@ -581,6 +598,7 @@ class ImprovedBrain:
         self.recent = deque(maxlen=12)  # (time, slot, text): echo guard
         self.lab_t = 0.0
         self.voice_at = 0.0       # perf_counter when anyone last made a sound
+        self.out_db = deque([-90.0], maxlen=30)  # Higgs's output level over the last 0.6 s (echo gate)
 
     def point(self):
         a = self.a
@@ -700,6 +718,8 @@ class ImprovedBrain:
             spec.speaker.cancel()
             spec = None
         mine = [h["text"] for h in a.history if h["speaker"] == a.ai][-3:]
+        if REPEAT_ASK.search(text):
+            mine = []  # "say that again?": repeating is the answer
         if ans and repeats(ans, mine):  # the writer said the same thing again: once more, asking for something new
             if spec:
                 spec.speaker.cancel()
@@ -728,12 +748,15 @@ class ImprovedBrain:
     async def tick(self, frames):
         t = self.t = self.t + TICK
         total = np.zeros(N, np.int32) + self.last_out
+        # Higgs's voice can come back through a person's speakers 0.1-0.5 s later: compare with its recent loudest frame
+        self.out_db.append(frame_db(self.last_out))
+        echo_db = max(self.out_db) if max(self.out_db) > -60 else None
         for f in frames.values():
             total += f
         for slot, li in list(self.listeners.items()):
             pcm = frames.get(slot, np.zeros(N, np.int16))
             others = np.clip(total - pcm, -32768, 32767).astype(np.int16)  # VAP's ch2: everyone but this person
-            await li.tick(t, pcm, others)
+            await li.tick(t, pcm, others, echo_db)
         await self._lab(t)
         anyone = any(li.speaking for li in self.listeners.values())
         self.take.tick(t, anyone)
