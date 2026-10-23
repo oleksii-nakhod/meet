@@ -36,6 +36,14 @@ def test_prefilter():
         assert pf(t) is None, t
 
 
+def test_join_pieces():
+    assert agent.join_pieces("I think the judges will.", "Want to see it running live?") == \
+        "I think the judges will want to see it running live?"
+    assert agent.join_pieces("Higgs, I was wondering whether.", "We should show the switch.") == \
+        "Higgs, I was wondering whether we should show the switch."
+    assert agent.join_pieces("Sorry, I was away.", "Higgs, when do we close?") == "Sorry, I was away. Higgs, when do we close?"
+
+
 def test_facts_relevant():
     facts = ["Submissions close Saturday at 3 pm.", "The project is a video call where Higgs joins."]
     assert agent.facts_relevant("When do submissions close?", [], facts, ["Higgs", "Alex"])

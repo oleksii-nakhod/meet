@@ -250,6 +250,15 @@ def fix_name(text, ai, people=()):
     return text
 
 
+def join_pieces(first, rest):
+    """Join a line's two transcribed pieces. STT ends every piece with punctuation; if the first stopped mid-sentence
+    ("I think the judges will." + "Want to see it running live?") it was one sentence."""
+    from mmhm.engine import unfinished
+    if re.search(r"[.?!]$", first) and unfinished(first[:-1]) and rest[:1].isupper() and not rest.startswith("I "):
+        return f"{first[:-1]} {rest[:1].lower()}{rest[1:]}"
+    return f"{first} {rest}"
+
+
 def prefilter(text, ai, history, people=()):
     """Before judging a transcribed line: (text with a misheard name repaired, kind). kind "skip": nothing to judge
     ("...", or a hum transcribed in another script: "嗯。"); "backchannel": an acknowledgement nobody needs answered
@@ -456,6 +465,7 @@ class Listener:
         self.merge = False       # they resumed right after a commit: join the next piece to the last line
         self.signals = None
         self.db, self.echo_frames = -90.0, 0
+        self.run, self.quiet = 0.0, 99.0
         self.session, self.open, self.stopped = None, False, False
         self.backlog = []        # audio to send once a (re)opened transcription session is up
         self.commit_waiting = None  # a line ended while the session was down: commit it after the backlog
@@ -536,6 +546,9 @@ class Listener:
         if self.speaking and echo_db is not None and self.db < echo_db - ECHO_DB:
             self.speaking = False
             self.echo_frames += 1
+        # continuous speech (gaps under 0.25 s don't break it): a "mm" is short, taking the floor isn't
+        self.quiet = 0.0 if self.speaking else self.quiet + TICK
+        self.run = self.run + TICK if self.speaking else (self.run if self.quiet < 0.25 else 0.0)
         if self.signals is not None and self.signals.ready.is_set():
             u16 = to16(pcm) * (1.0 if self.speaking else 0.05)  # noise gate, as in engine.tick
             sig = self.signals.push(u16, to16(others))
@@ -701,7 +714,7 @@ class ImprovedBrain:
         self.recent.append((time.time(), li.slot, text))
         merged = merge and bool(a.history) and a.history[-1]["speaker"] == li.name
         if merged:  # they went on after a pause: one line (the transcript panel replaces the fragment)
-            text = a.history.pop()["text"] + " " + text
+            text = join_pieces(a.history.pop()["text"], text)
         text, kind = prefilter(text, a.ai, a.history, a.names())
         if kind == "skip":
             return
@@ -847,7 +860,8 @@ class ImprovedBrain:
         out = None
         r = self.playing
         if r is not None and not r.video:
-            if anyone:  # someone took the floor while the face was being rendered: let them have it
+            taker = next((li for li in self.listeners.values() if li.run >= FLOOR_POLICY.interrupt_max), None)
+            if taker or r.line_id != self.line_no:  # someone took the floor while the face rendered (a "mm" doesn't)
                 r.cancel = True
                 r.speaker.cancel()
                 if r.hist_idx == len(self.a.history) - 1:  # never heard: not part of the meeting
