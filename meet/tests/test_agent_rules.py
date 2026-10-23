@@ -51,6 +51,12 @@ def test_first_sentence():
     assert agent.first_sentence("Yes.") == "Yes."
 
 
+def test_vocative_only():
+    assert agent.vocative_only("Hey, Higgs.", "Higgs") and agent.vocative_only("Higgs?", "Higgs")
+    assert not agent.vocative_only("Hey Higgs, how long can the video be?", "Higgs")
+    assert not agent.vocative_only("Hey there.", "Higgs")
+
+
 def test_facts_relevant():
     facts = ["Submissions close Saturday at 3 pm.", "The project is a video call where Higgs joins."]
     assert agent.facts_relevant("When do submissions close?", [], facts, ["Higgs", "Alex"])

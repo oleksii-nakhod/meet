@@ -148,6 +148,20 @@ SCENARIOS4 = [  # long: past Higgs's 5-minute idle timeout (session.idle_timeout
         ("say", "Alex", "Higgs, and what are the judging criteria?", "reply")]),
 ]
 
+SCENARIOS5 = [  # the switch on the call, flipped mid-conversation
+    dict(name="switch_modes", modes=("improved",), people=["Alex", "Priya"], steps=[
+        ("say", "Alex", "Higgs, when do submissions close?", "reply"),
+        ("mode", "default", 4.0),
+        ("say", "Priya", "Higgs, how long can the video be?", "reply"),
+        ("mode", "improved", 4.0),
+        ("say", "Alex", "Higgs, what did Priya just ask you?", "reply"),
+        ("say", "Priya", "Alex, can you send me the link?", "silent"),
+        ("avatar", True, 3.0),
+        ("say", "Alex", "Higgs, what are the judging criteria?", "reply"),
+        ("avatar", False, 2.0),
+        ("say", "Priya", "Higgs, thanks, and what's the most important one?", "reply")]),
+]
+
 SCENARIOS = [
     # ---------------- one person and Higgs ----------------
     dict(name="greet_1to1", people=["Alex"], steps=[
@@ -378,6 +392,11 @@ async def run_step(step, bots_, ear, mode):
         await asyncio.sleep(0.5)
         row.update(window_events(ear, t_start, ear.now()))
         return row
+    if kind in ("mode", "avatar"):  # someone flips the switch mid-call
+        msg = {"type": "set_mode", "mode": step[1]} if kind == "mode" else {"type": "set_avatar", "on": step[1]}
+        await ear.json(msg)
+        await asyncio.sleep(step[2] if len(step) > 2 else 3.0)
+        return None
     if kind == "join":  # someone joins mid-call
         b = Bot(ear.base, ear.room, step[1])
         bots_[step[1]] = b
@@ -471,7 +490,8 @@ def short(r):
 async def main_async(a):
     outdir = os.path.join(MEET, "out", "scen", a.tag)
     os.makedirs(outdir, exist_ok=True)
-    pool = {"1": SCENARIOS, "2": SCENARIOS2, "3": SCENARIOS3, "4": SCENARIOS4, "all": SCENARIOS + SCENARIOS2}[a.set]
+    pool = {"1": SCENARIOS, "2": SCENARIOS2, "3": SCENARIOS3, "4": SCENARIOS4, "5": SCENARIOS5,
+            "all": SCENARIOS + SCENARIOS2}[a.set]
     todo = [(sc, m) for sc in pool if not a.only or sc["name"] in a.only for m in a.modes
             if m in sc.get("modes", ("default", "improved"))]
     # warm the TTS cache first (parallel, outside the timed part)
@@ -522,7 +542,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--modes", nargs="+", default=["improved", "default"])
     ap.add_argument("--only", nargs="*")
-    ap.add_argument("--set", default="1", choices=["1", "2", "3", "4", "all"])
+    ap.add_argument("--set", default="1", choices=["1", "2", "3", "4", "5", "all"])
     ap.add_argument("--par", type=int, default=4)
     ap.add_argument("--port", type=int, default=8641)
     ap.add_argument("--samples", type=int, default=0, help="judge samples per line (0: the agent's default)")

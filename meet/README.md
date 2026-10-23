@@ -41,8 +41,11 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
     people kept talking (8 s in a quiet room). Every reply that was decided but not spoken logs `reply_skipped`.
   - **While Higgs talks:** a listener's "mm-hm" only ducks it. A real interruption stops it, and Higgs remembers
     only what was heard (`floor.py`, ported from `mmhm/engine.py`; 16 unit tests).
-- **Avatar** (improved mode, off by default): the reply is rendered by Higgs Avatar once its speech is ready, and
-  the audio waits for the first video chunk. This adds ~2.5 s. A pre-rendered idle loop plays between replies.
+- **Avatar** (improved mode, off by default): replies are one sentence; Higgs Avatar renders it as soon as its speech
+  is ready, into a buffer, and video and audio are released together when the floor opens. A reply is ~4.1 s after
+  the line (median of 9 in `tests/scenarios.py --set 3`; ~1.6 s without the face). Only someone taking the floor
+  (0.8 s of speech) cancels a reply while its face renders; a "mm" doesn't. A pre-rendered idle loop plays between
+  replies.
 
 Scripted test (`tests/meeting_run.py`): roommates meeting B2 from Third Voice's test set, 3 people, 32 lines, 6
 where the AI should speak. Each person's lines are their own fake microphone in headless Chromium, so the
@@ -100,6 +103,20 @@ These only enqueue: each socket has its own sender, audio for a client that fall
 ## Test
 
     python tests/fake_room.py      # 3 headless Chromium pages with fake voices and cameras, then HTTPS; no Higgs calls
+    python -m pytest tests/test_floor.py tests/test_agent_rules.py   # timing + text rules, no API (also ./run.sh tests)
+
+With Higgs (each makes real API calls; keep to ~3 servers at once, Higgs caps concurrent sessions per key):
+
+    python tests/scenarios.py --set all --modes improved default --par 3   # 37 interactive scenes, bots over /ws/room
+    python tests/scenarios.py --set 3     # with the Avatar     --set 4: past Higgs's 5-minute idle timeout
+    python tests/judge_cases.py [--file judge_heldout.jsonl]   # the speak/silent decision on 63 / 120 written lines
+    python tests/tv_regress.py --set test --prompts v4b v5     # Third Voice's group test set through agent.decide
+    python tests/writer_cases.py          # what the reply writer says, two prompt versions side by side
+    python tests/browser_bc.py --mode default                  # backchannels through a real Chrome mic path
+    python tests/ami_meeting.py --meeting ES2009c --minutes 10 # a real AMI meeting, 4 people on 4 bots
+
+`scenarios.py` scores each step from what a participant hears (Higgs's slot-0 audio) and the room's events, and
+prints where a failure came from (what STT heard, the judge's reading, a floor drop, `reply_skipped`).
 
 It checks roster, audio and video between all pages, chat, mode switch, the stub's slot-0 beep, ai_gain/ai_flush,
 transcript lines, captions, lab bars, avatar fMP4 playback, reload/leave/slot reuse, the 5-person cap, passcode,

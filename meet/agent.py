@@ -343,6 +343,15 @@ def first_sentence(text, complete_only=False):
     return None if complete_only else text
 
 
+VOCATIVE_WAIT = 0.9  # silence after a line that only calls the AI before answering it
+
+
+def vocative_only(text, ai):
+    """"Hey, Higgs." / "Higgs?" / "Hi Higgs!": the AI's name with at most a greeting word."""
+    rest = [w for w in re.findall(r"[a-z']+", text.lower()) if w != ai.lower()]
+    return ai.lower() in text.lower() and all(w in ("hey", "hi", "hello", "ok", "okay", "um", "so", "oh", "yo") for w in rest)
+
+
 def frame_db(pcm):
     x = pcm.astype(np.float32) / 32768
     return float(20 * np.log10(np.sqrt(np.mean(x * x)) + 1e-9))
@@ -522,6 +531,9 @@ class DefaultBrain:
         for e in self.engine.log[self.k:]:
             kind = e["kind"]
             if kind == "user_text" and (e.get("text") or "").strip():
+                # into the shared history too (who said it is unknown: one mixed stream), so that after a switch
+                # the improved brain knows what was asked ("What did Priya just ask you?" got invented otherwise)
+                self.a.history.append({"speaker": "someone in the room", "text": e["text"].strip()})
                 await self.a.line(None, "the room", e["text"].strip(), {"speak": True, "why": "default Higgs answers every turn"})
             elif kind == "respond":
                 spend()
@@ -551,6 +563,8 @@ class Listener:
         self.signals = None
         self.db, self.echo_frames = -90.0, 0
         self.run, self.quiet = 0.0, 99.0
+        self.in_flight = 0       # committed lines not yet transcribed and judged
+        self.last_voice = 0.0    # perf_counter of their last voiced frame
         self.session, self.open, self.stopped = None, False, False
         self.backlog = []        # audio to send once a (re)opened transcription session is up
         self.commit_waiting = None  # a line ended while the session was down: commit it after the backlog
@@ -630,6 +644,8 @@ class Listener:
         if self.speaking and echo_db is not None and self.db < echo_db - ECHO_DB:
             self.speaking = False
             self.echo_frames += 1
+        if self.speaking:
+            self.last_voice = time.perf_counter()
         # continuous speech (gaps under 0.25 s don't break it): a "mm" is short, taking the floor isn't
         self.quiet = 0.0 if self.speaking else self.quiet + TICK
         self.run = self.run + TICK if self.speaking else (self.run if self.quiet < 0.25 else 0.0)
@@ -651,6 +667,7 @@ class Listener:
         for act in self.gate.update(t, self.speaking, self.p_now):
             if act == "commit" and self.sent >= int(self.p.min_turn / TICK):
                 self.streaming, self.sent = False, 0
+                self.in_flight += 1  # until on_line has decided it (a reply waiting for the floor checks this)
                 self.t_speech_end = time.perf_counter() - self.gate.silence
                 self.commit_info = {"why": self.gate.why, "p_now": None if self.p_now is None else round(self.p_now, 2),
                                     "lag": self.signals.lag() if self.signals is not None else None}
@@ -663,6 +680,14 @@ class Listener:
                 self.b.on_resume(self)
 
     async def _transcribe(self, t_end):
+        self.decided_early = False
+        try:
+            await self._transcribe_and_decide(t_end)
+        finally:
+            if not self.decided_early:
+                self.in_flight = max(0, self.in_flight - 1)
+
+    async def _transcribe_and_decide(self, t_end):
         if not spend():
             return
         s = self.session
@@ -687,10 +712,12 @@ class Reply:
     """A reply being voiced (TTS 3, sentence by sentence). Given `text` it is complete at once; given None, its text
     streams in through feed() (spoken while it arrives) until close()."""
 
-    def __init__(self, line_id, listener, line_text, text, t_end, one=False):
+    def __init__(self, line_id, listener, line_text, text, t_end, one=False, ai=None):
         self.line_id, self.listener, self.line_text, self.t_end = line_id, listener, line_text, t_end
         self.text, self.closed = "", False
         self.one = one           # only the first sentence (Avatar on: its render waits for the whole speech)
+        self.label, self.head = (f"{ai}:" if ai else None), ""  # the writer sometimes starts with "Higgs:"
+        self.vocative = False    # its line only called the AI ("Hey, Higgs."): the request may follow a pause
         self.audio, self.done, self.pos, self.hist_idx = bytearray(), False, 0, None
         self.video = True        # False while its Avatar render hasn't sent the first chunk (audio waits for it)
         self.render = None       # Avatar render task, started as soon as the speech is done (before the floor opens)
@@ -708,6 +735,12 @@ class Reply:
     def feed(self, delta):
         if self.closed:
             return
+        if self.label is not None:  # hold the first characters back until we know they aren't "Higgs:"
+            self.head += delta
+            if len(self.head) < len(self.label) + 1 and not self.head.endswith((".", "!", "?")):
+                return
+            delta, self.head = re.sub(rf"^\s*{re.escape(self.label)}\s*", "", self.head, flags=re.I), ""
+            self.label = None
         if self.one:
             cut = first_sentence(self.text + delta, complete_only=True)
             if cut is not None:
@@ -719,6 +752,9 @@ class Reply:
         self.speaker.feed(delta)
 
     def close(self):
+        if self.head and not self.closed:  # a reply shorter than the label check
+            h, self.head, self.label = self.head, "", None
+            self.feed(h)
         if not self.closed:
             self.closed = True
             self.text = self.text.strip().strip('"')
@@ -841,11 +877,13 @@ class ImprovedBrain:
         pools = self.pools
         ctx = "\n".join(f"{t['speaker']}: {t['text']}" for t in context[-14:])
         convo = f"Conversation so far:\n{ctx}\n{li.name}: {text}\n\nYour reply:"
+        if a.avatar:  # the face renders only once the whole reply is spoken, and TTS takes about as long as the speech
+            convo = "[Answer in one short sentence of at most 12 words.]\n" + convo
         # Likely a reply (a one-to-one call, the AI's name, a question): voice the draft while it streams in and the
         # judge decides (~0.5 s sooner). Otherwise draft only; a silent line costs no speech.
         spec = None
         if SPECULATE and (len(self.listeners) == 1 or a.ai.lower() in text.lower() or text.rstrip().endswith("?")):
-            spec = Reply(line_id, li, text, None, t_end, one=a.avatar)
+            spec = Reply(line_id, li, text, None, t_end, one=a.avatar, ai=a.ai)
         writer = pools["write"] if facts_relevant(text, context[-2:], a.facts, [a.ai] + a.names()) else pools["write0"]
         draft = asyncio.ensure_future(writer.ask(convo, retries=1, on_delta=spec.feed if spec else None))
         # both drafts start with the decision, so a correction costs no extra wait (rewriting it after: ~1 s)
@@ -853,6 +891,8 @@ class ImprovedBrain:
         speak, d = await decide(r, lambda kind, _sys, user, _i: pools[kind].ask(user), samples=self.samples, prompt=PROMPT)
         why = d["reading"]
         t_decided = time.perf_counter()
+        li.in_flight = max(0, li.in_flight - 1)  # decided: a reply waiting on this line may go (or drop)
+        li.decided_early = True
         await a.line(li.slot, li.name, text, {"speak": speak, "why": d["why"], "reading": why, "votes": d["votes"],
                                               "checks": d["checks"],
                                               "decided_s": round(time.perf_counter() - t_end, 2)}, merged)
@@ -884,6 +924,7 @@ class ImprovedBrain:
             ans = (await writer.ask("[You are an AI in this call and can't do work outside it (coding, building, "
                                     "booking): don't volunteer for tasks.]\n" + convo_used, retries=1)).strip().strip('"') or ans
             t_draft = time.perf_counter()
+        ans = re.sub(rf"^\s*{re.escape(a.ai)}\s*:\s*", "", ans, flags=re.I)  # "Higgs: Judging is ..."
         if a.avatar:  # one sentence with the face on: the render waits for the whole reply's speech
             ans = first_sentence(ans).strip().strip('"')
         if spec and (not ans or spec.text.strip().strip('"') != ans):  # the stream failed and a retry answered
@@ -912,6 +953,7 @@ class ImprovedBrain:
             self.pending = spec
         else:
             self.pending = Reply(line_id, li, text, ans, t_end)
+        self.pending.vocative = vocative_only(text, a.ai)
         if a.avatar:  # render ahead, into a buffer: by the time the floor opens the face is (nearly) ready
             self.pending.video = False
             self.pending.render = asyncio.ensure_future(self._render(self.pending))
@@ -949,6 +991,14 @@ class ImprovedBrain:
                            and (x.p_now is None or x.p_now >= FLOOR_POLICY.th_play)), None)
             if act == "play" and holder is not None:
                 act, why = "wait", f"{holder.name} may go on"  # someone else just spoke and still holds the floor
+            # someone else spoke after this line and what they said isn't judged yet (it may answer it: "Saturday at
+            # three"): wait for that verdict; a substantive line then makes this reply stale, a "mm-hm" doesn't
+            other = next((x for x in self.listeners.values() if x is not li and (x.in_flight or
+                          (x.gate.speech >= LINE_POLICY.min_turn and x.last_voice > r.t_end))), None)
+            if act == "play" and other is not None:
+                act, why = "wait", f"{other.name}'s line"
+            if act == "play" and r.vocative and li.gate.silence < VOCATIVE_WAIT:
+                act, why = "wait", "the request may follow"  # "Hey Higgs, [pause] quick one: ..."
             age = time.perf_counter() - r.t_end
             if act != "drop" and ((age > STALE_S and self.voice_at > r.t_end) or age > STALE_MAX):
                 act, why = "drop", "stale"  # people moved on (or it's very late); a slow reply to a quiet room still plays
