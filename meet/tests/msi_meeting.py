@@ -26,7 +26,7 @@ SHORT = {"speaker_authority_constraint": "auth", "sequential_constraint_integrat
 ADMIN = "scen-admin"
 
 
-def cases(n, seed=0):
+def cases(n, seed=int(os.environ.get("MSI_SEED", "0"))):
     out = []
     for c in map(json.loads, open(os.path.join(MSI, "index", "cases.jsonl"))):
         if c["language"] != "en" or any(t["role"] == "assistant" for t in c["turns"]):
