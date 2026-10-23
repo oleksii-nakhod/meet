@@ -11,13 +11,15 @@ from mmhm.expressive import SentenceSpeaker, spoken, voiced  # noqa: E402
 
 def test_unfinished_catches_mid_sentence_stops():
     for t in ["I've been learning to play the.", "My sister just moved to.", "The weird part is that, um,",
-              "So I was thinking that maybe we could", "and we're."]:
+              "So I was thinking that maybe we could", "and we're.", "Higgs, I was wondering whether.",
+              "So I was thinking that"]:
         assert unfinished(t), t
 
 
 def test_unfinished_lets_finished_turns_through():
     for t in ["What's the best place to get coffee around here?", "Which team are you on?", "Thank you.",
-              "I love it.", "Yeah, good point.", ""]:
+              "I love it.", "Yeah, good point.", "", "Go on.", "Hold on", "Tell me more about that.",
+              "what do you mean by that", "what are you working on", "Let's do this"]:
         assert not unfinished(t), t
 
 

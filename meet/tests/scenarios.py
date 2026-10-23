@@ -143,10 +143,11 @@ def window_events(b, t0, t1):
               "why": (m.get("decision") or {}).get("why"), "reading": (m.get("decision") or {}).get("reading"),
               "decided_s": (m.get("decision") or {}).get("decided_s")} for t, m in ev if m.get("type") == "line"]
     says = [m.get("text") for t, m in ev if m.get("type") == "ai_say"]
-    states = [{k: m.get(k) for k in ("status", "dropped", "stopped", "after_s", "why", "heard") if m.get(k) is not None}
+    states = [{k: m.get(k) for k in ("status", "dropped", "stopped", "after_s", "why", "heard", "timing") if m.get(k) is not None}
               for t, m in ev if m.get("type") == "ai_state" and (m.get("dropped") or m.get("stopped") or m.get("after_s"))]
     flushes = [round(t, 2) for t, m in ev if m.get("type") == "ai_flush"]
     errors = [m.get("error") for t, m in ev if m.get("type") == "ai_error"]
+    errors += [f"skipped: {m.get('why')}" for t, m in ev if m.get("type") == "reply_skipped"]
     return {"lines": lines, "ai_say": says, "states": states, "flush": flushes, "errors": errors}
 
 
@@ -318,6 +319,8 @@ def short(r):
     for st in r.get("states", []):
         if st.get("dropped") or st.get("stopped"):
             s += f"\n      {st}"
+    for e in r.get("errors", []):
+        s += f"\n      !! {e}"
     return s
 
 

@@ -43,7 +43,9 @@ def clip(text, voice="marcus", gain_db=0.0, **extra):
                 if k == 3:
                     raise
                 time.sleep(2 + 3 * k)
-        save_wav(path, trim(pcm))
+        tmp = f"{path[:-4]}.{os.getpid()}.tmp.wav"
+        save_wav(tmp, trim(pcm))
+        os.replace(tmp, path)  # atomic: parallel runs share the cache
     pcm = load_wav(path)
     if gain_db:
         pcm = np.clip(pcm.astype(np.float32) * 10 ** (gain_db / 20), -32768, 32767).astype(np.int16)

@@ -40,7 +40,15 @@ N = int(SR * TICK)  # 480 samples at 24 kHz
 INCOMPLETE = set("""the a an my your our their his her its this that these those to of in on at for with about from by
 into like as than and but or because so if when then while although though is was are were be been being am have has
 had do does did will would can could should might must um uh er like i we they he she which who whom whose where
+whether
 we're you're they're i'm it's there's that's he's she's i've we've you've i'd we'd i'll we'll""".split())
+
+
+# ...but these endings are complete (2026-10-23, the meeting floor held "Go on." for 1.6 s)
+COMPLETE_ENDS = {(v, "on") for v in "go going carry hold come move moving keep working work focus agree log turn".split()}
+DEMONSTRATIVE = {"that", "this", "those", "these"}
+TAKES_OBJECT = set("""about by like with of on in at for from do did does done mean meant said say see saw try tried
+is was fix change need want love hate like""".split())
 
 
 def unfinished(transcript):
@@ -51,6 +59,9 @@ def unfinished(transcript):
     if t.endswith((",", "...", "…", "-", "—")):
         return True
     words = re.findall(r"[a-zA-Z']+", t.lower())
+    if len(words) >= 2 and (words[-2], words[-1]) in COMPLETE_ENDS or (len(words) >= 2 and words[-1] in DEMONSTRATIVE
+                                                                       and words[-2] in TAKES_OBJECT):
+        return False  # "go on", "hold on", "tell me more about that", "what do you mean by that"
     return bool(words) and words[-1] in INCOMPLETE
 
 
