@@ -95,7 +95,7 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
     (`MEET_SPEECH`, default `realtime`); TTS 3 takes over if Realtime hasn't started within 2 s. When the line looks
     like it wants a reply (one-to-one, the AI's name, a question) it is answered in **one hop** (`MEET_ONEHOP`,
     2026-10-24): the conversation goes straight to a voice session with the writer's instructions (a
-    `session.update` on the room's pool of 3 voice sessions, ~20 ms, no new voice check), so there's no second
+    `session.update` on the room's pool of 2 voice sessions, ~20 ms, no new voice check), so there's no second
     request to read a text draft aloud (first audio ~0.49 s after asking instead of ~0.90 s, `tests/onehop_bench.py`).
     Its transcript streams in with the speech; it may play once the judge says speak and its first sentence passes
     the checks (not its own label, not the speaker's words, no refusal or volunteering), else the text draft written
