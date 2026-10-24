@@ -5,6 +5,7 @@
 #   ./public.sh            (Ctrl-C stops both)
 # Env: MEET_ADMIN (default: a random token), MEET_BUDGET (Higgs requests per server run, default 30000),
 #      CLOUDFLARED (default ~/.local/opt/cloudflared/cloudflared),
+#      MEET_ROOM: the one meeting link /r/<id> (default Yrw_p1Ja-3U; empty: every new room gets its own link),
 #      MEET_HOST: your own hostname (e.g. meet.example.com) via a named tunnel made in the Cloudflare dashboard (Zero Trust
 #      -> Networks -> Tunnels; DNS: CNAME <host> -> <tunnel id>.cfargotunnel.com, proxied); its token goes in MEET_TUNNEL_TOKEN_FILE
 #      (default ~/.cloudflared/meet.token, chmod 600). Without MEET_HOST: a random trycloudflare.com link.
@@ -13,6 +14,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 PY="${PYTHON:-$HERE/.venv/bin/python}"; [ -x "$PY" ] || PY=python3
 CF="${CLOUDFLARED:-$HOME/.local/opt/cloudflared/cloudflared}"
 export MEET_ADMIN="${MEET_ADMIN:-$("$PY" -c 'import secrets; print(secrets.token_urlsafe(9))')}"
+export MEET_ROOM="${MEET_ROOM-Yrw_p1Ja-3U}"
 cd "$HERE" && mkdir -p out
 CFP=""
 "$PY" server.py --port 8600 --host 127.0.0.1 & SRV=$!
@@ -36,6 +38,7 @@ fi
 [ -z "${URL:-}" ] && { echo "tunnel didn't come up; see out/cloudflared.log"; exit 1; }
 kill -0 $SRV 2>/dev/null || { echo "the server didn't start (is another ./public.sh still running on port 8600?)"; exit 1; }
 echo
+[ -n "$MEET_ROOM" ] && echo "  Meeting link:   $URL/r/$MEET_ROOM  (setting up a new meeting replaces the one there)"
 echo "  Create a room:  $URL/?admin=$MEET_ADMIN"
 echo "  (then share the room link it gives you; the admin link is only for you)"
 echo

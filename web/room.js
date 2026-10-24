@@ -122,6 +122,7 @@ function connect() {
     const fatal = { 4001: "The room is full (5 people).", 4003: "Wrong passcode.", 4004: "This room doesn't exist any more.",
       4000: "You joined from another tab, so this one was disconnected." }[e.code];
     if (fatal) { leaveCall(fatal); return; }
+    if (e.code === 4005) { left = true; location.reload(); return; } // a new meeting replaced this one at the same link
     if (!joined) { // never got in: back to the join screen
       $("jerr").textContent = "Couldn't connect. Try again."; $("jgo").disabled = false; return;
     }
