@@ -306,7 +306,8 @@ async def decide(r, ask, samples=3, prompt="v4b"):
                        or named_ai_before(r["context_turns"], cur["speaker"], ai)):
         # every judge request failed (a Higgs hiccup): a line put to the AI is answered, not dropped as "nothing
         # asked" ("Higgs." [pause] "Quick one, how long can the video be?" went unanswered, 0 votes)
-        return True, {"reading": {"to": "me"}, "why": "asked me (judge unavailable)", "votes": 0,
+        return True, {"reading": {"to": "me", **({"wrong": True} if wrong else {})}, "why": "asked me (judge unavailable)",
+                      "votes": 0,
                       "checks": [p.get("contradicts") for p in checks]}
     return speak, {"reading": reading, "why": reason(reading, speak), "votes": len(parsed), "checks":
                    [p.get("contradicts") for p in checks]}
@@ -942,6 +943,9 @@ class Pool:
         try:
             ids = list(dict.fromkeys(e["item"]["id"] for t, e in s.events if t >= since and e.get("type") ==
                                      "conversation.item.added" and (e.get("item") or {}).get("id")))
+            if not ids and s.close_code is None and time.perf_counter() - s.opened_at < self.MAX_AGE:
+                await self._put(s)  # taken but not used (the request was cancelled first)
+                return
             for i in ids:
                 await s.send({"type": "conversation.item.delete", "item_id": i})
             for i in ids:
@@ -1022,18 +1026,16 @@ class Pool:
             rid = ev["response"]["id"]
             done = asyncio.ensure_future(s.wait(lambda e: e.get("type") == "response.done"
                                                 and (e.get("response") or {}).get("id") == rid, timeout=30, since=since))
-            n, ei, said = 0, len(s.events), ""
+            n, said = 0, ""
             while True:
                 buf = s.audio.get(rid, b"")
                 if len(buf) > n:
                     on_audio(bytes(buf[n:n + (len(buf) - n) // 2 * 2]))
                     n += (len(buf) - n) // 2 * 2
-                if on_text is not None:  # the transcript's new deltas
-                    new = "".join(e.get("delta", "") for _, e in s.events[ei:] if e.get("response_id") == rid
-                                  and e.get("type") == "response.output_audio_transcript.delta")
-                    ei = len(s.events)
-                    if new:
-                        said += new
+                if on_text is not None:  # the transcript so far (all of it: deltas that came with response.created too)
+                    now_said = s.transcript(rid)
+                    if now_said != said:
+                        said = now_said
                         on_text(said)
                 if done.done():
                     if on_text is not None:
@@ -1534,6 +1536,7 @@ class Reply:
         self.rt = reader is not None or hop is not None  # voiced by a Realtime session, not TTS 3
         self.hop = hop is not None  # (voice pool, writer instructions, convo): answered in audio (HopSpeaker, ONEHOP)
         self.said = False        # ai_say sent (a one-hop reply's: once its transcript is complete)
+        self.caption = False     # an ai_say with its first sentence went out (the complete one updates it)
         done = lambda: setattr(self, "done", True)  # noqa: E731
         self.speaker = (HopSpeaker(hop[0], hop[1], hop[2], self.audio, done) if self.hop
                         else RealtimeSpeaker(reader, self.audio, done) if self.rt else SentenceSpeaker(VOICE, self.audio, done))
@@ -1786,8 +1789,8 @@ class ImprovedBrain:
         # transcribed first, the louder one is who said it.
         now = time.time()
         for rec in self.recent:
-            if rec["slot"] == li.slot or now - rec["t"] >= BLEED_S:
-                continue
+            if rec["slot"] == li.slot or now - rec["t"] >= BLEED_S or abs(t_end - rec["t_end"]) > 0.8:
+                continue  # copies of one utterance end together (an answer 2 s later isn't bleed)
             same = now - rec["t"] < 2.0 and repeats(text, [rec["text"]])
             if not (same or overlaps(text, rec["text"])):
                 continue
@@ -1797,6 +1800,10 @@ class ImprovedBrain:
                 a.room.log({"type": "bleed", "slot": rec["slot"], "text": rec["text"][:80], "why": "louder here",
                             "to": li.name, "db": [round(rec["db"], 1), round(db, 1)]})
                 old = rec["slot"]
+                if len(text) > len(rec["text"]):  # the louder mic heard more of it ("Hi everyone! Hi Higgs, can...")
+                    rec["text"] = text
+                    if rec["entry"] is not None and rec["entry"].get("speaker") != a.ai:
+                        rec["entry"]["text"] = text
                 self._reattribute(rec, li)
                 if rec["shown"]:  # already on the transcript panel under the other person: move it
                     owed = any(r is not None and r.line_id == rec["line"] for r in (self.pending, self.playing))
@@ -1807,8 +1814,8 @@ class ImprovedBrain:
                 a.room.log({"type": "bleed", "slot": li.slot, "text": text[:80], "why": "quieter" if quieter else "same words",
                             "db": None if db is None else round(db, 1)})
                 return
-        rec = {"t": now, "slot": li.slot, "text": text, "db": db, "entry": None, "line": None, "owner": None,
-               "shown": False}
+        rec = {"t": now, "t_end": t_end, "slot": li.slot, "text": text, "db": db, "entry": None, "line": None,
+               "owner": None, "shown": False}
         self.recent.append(rec)
         merged = merge and bool(a.history) and a.history[-1]["speaker"] == li.name
         if merged and cut is None:
@@ -2026,6 +2033,10 @@ class ImprovedBrain:
                 spec.speaker.cancel()
             await a.room.event({"type": "reply_skipped", "line": text[:80], "why": skip})
             return
+        if rec["owner"] is not None and rec["owner"] is not li:  # a louder copy came while it was written
+            li = rec["owner"]
+            if spec:
+                spec.listener = li
         self._cancel_pending("a newer reply")
         if spec:
             spec.close()
@@ -2174,7 +2185,8 @@ class ImprovedBrain:
                 await self.a.status("speaking", after_s=round(now - r.t_end, 2), why=r.play_why, timing=timing)
                 if not r.hop:
                     r.said = True
-                    await self.a.room.event({"type": "ai_say", "text": r.text})
+                await self.a.room.event({"type": "ai_say", "text": r.text})
+                r.caption = r.hop  # a one-hop reply's line is completed with an update when its transcript is
             if r.hop:  # its words are still being transcribed: the history and the captions follow
                 said = r.speaker.text.strip()  # (not `t`: that's this tick's clock)
                 if said and said != r.text:
@@ -2184,7 +2196,7 @@ class ImprovedBrain:
                         self.a.history[r.hist_idx]["text"] = said
                 if not r.said and (r.speaker.finished or r.speaker.failed or r.done):
                     r.said = True
-                    await self.a.room.event({"type": "ai_say", "text": r.text})
+                    await self.a.room.event({"type": "ai_say", "text": r.text, "update": True})
             gains = []
             hold = BARGE and r.correction  # talked over: keep going at full volume (HOLD_POLICY)
             for li in self.listeners.values():
@@ -2232,6 +2244,9 @@ class ImprovedBrain:
             r.speaker.cancel()
         if r.vstarted:
             await self.a.room.avatar_stop()
+        if r.hop and not r.said:  # its transcript wasn't sent yet: what was heard of it
+            r.said = True
+            await self.a.room.event({"type": "ai_say", "text": heard, "update": r.caption})
         if r.hist_idx is not None and r.hist_idx < len(self.a.history):
             # marked, so the judge and the writer know it was cut off (unmarked, the writer resumed its old answer)
             self.a.history[r.hist_idx]["text"] = f"{heard} [interrupted]"

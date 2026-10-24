@@ -144,13 +144,22 @@ function onMessage(e) {
   bump(W.msgs, m.type);
   if (m.type === "roster") onRoster(m);
   else if (m.type === "chat") addChat(m);
-  else if (m.type === "ai_flush") { mixer.port.postMessage({ flush: 0 }); liveFlush(); clearTimeout(live.cap); }
+  else if (m.type === "ai_flush") { // a caption still waiting for the face never showed: its update is a new line
+    mixer.port.postMessage({ flush: 0 }); liveFlush();
+    if (live.cap) { clearTimeout(live.cap); live.cap = null; live.unshown = true; }
+  }
   else if (m.type === "ai_gain") { live.gain = Math.max(0, Math.min(1, +m.gain)); mixer.port.postMessage({ gain: live.gain, slot: 0, ramp: 0.03 }); liveVolume(); }
   else if (m.type === "live_avatar") liveAvatar(m);
   else if (m.type === "ai_state") onAiState(m);
   else if (m.type === "line") addLine(m);
   else if (m.type === "ai_note") toast(m.text, "mode");
-  else if (m.type === "ai_say") live.video ? (live.cap = setTimeout(() => aiSay(m.text), 1300)) : aiSay(m.text); // with the face's words
+  else if (m.type === "ai_say") { // with the face's words; an update completes the line before it (one-hop transcript)
+    const merge = !!m.update && !live.unshown; // replace the line it completes, if that one was shown
+    live.unshown = false;
+    if (m.update && live.cap) { clearTimeout(live.cap); live.cap = null; aiSay(m.text, live.capMerge); } // not shown yet
+    else if (live.video) { live.capMerge = merge; live.cap = setTimeout(() => { live.cap = null; aiSay(m.text, merge); }, 1300); }
+    else aiSay(m.text, merge);
+  }
   else if (m.type === "lab") lab(m);
   else if (m.type === "script") setStep(m.step, false);
 }
@@ -282,12 +291,12 @@ function onAiState(m) {
   if (W.ai.status !== "speaking") setTimeout(() => W.ai.status !== "speaking" && (t.querySelector(".cap").textContent = ""), 4000);
 }
 
-function aiSay(text) {
+function aiSay(text, update) {
   const t = tiles[0];
   clearTimeout(aiSay.timer);
   aiSay.timer = setTimeout(() => W.ai.status !== "speaking" && tiles[0] && (tiles[0].querySelector(".cap").textContent = ""), 8000);
   if (t) { t.querySelector(".cap").innerHTML = ""; const s = document.createElement("span"); s.textContent = text; t.querySelector(".cap").appendChild(s); }
-  addLine({ slot: 0, name: aiName, text });
+  addLine({ slot: 0, name: aiName, text, ...(update ? { merge: true } : {}) }); // merge: replaces its last line
 }
 
 // ---------- side panel ----------
