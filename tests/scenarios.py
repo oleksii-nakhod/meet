@@ -110,7 +110,10 @@ SCENARIOS2 = [
         ("await", "silent", 8.0),
         ("say", "Alex", "Higgs, when do submissions close?", "reply"),
         ("await", "silent", 8.0),
-        ("say", "Alex", "Higgs, can you explain in a few sentences how we should structure the demo video?", "reply")]),
+        ("say", "Alex", "Higgs, can you explain in a few sentences how we should structure the demo video?", "reply"),
+        ("await", "silent", 6.0),
+        ("say", "Alex", ["So I was thinking", 1.2, "maybe we open the video with a live call. What do you think, Higgs?"],
+         "reply")]),
     dict(name="soft_barge", people=["Alex", "Priya"], steps=[
         ("talk_over", "Alex", LONG_Q, ("Priya", {"ami": "int_03.wav", "gain_db": -6}), "stop"),
         ("talk_over", "Priya", "Higgs, what's the riskiest part of our plan?", ("Alex", {"ami": "int_07.wav", "gain_db": -6}), "stop")]),

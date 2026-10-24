@@ -120,16 +120,25 @@ def test_voice_gate_ignores_background_voices():
     assert g(True, -24.0) and g(True, -42.0) and g(True, -42.0)
     assert not g(True, -42.0) or not g(True, -42.0)                      # ...but not once the loud part is 60 ms back
     assert not g(False, -20.0)                                           # the VAD's "silence" stays silence
+    assert not g.background                                              # ...and isn't a background voice
+    g(True, -24.0)
+    g(True, -50.0), g(True, -50.0), g(True, -50.0)
+    assert g.background                                                  # a voice far below theirs is (blanked for STT)
+    g(True, -24.0)
+    assert not g.background
 
 
 def test_voice_gate_when_the_tv_was_first():
     g = agent.VoiceGate(gate_db=15)
-    for _ in range(100):
-        g(True, -45.0)                       # only the TV so far: nothing to compare with, it passes
+    for _ in range(2000):
+        g(True, -45.0)                       # only the TV so far, for 40 s: nothing to compare with, it passes
     assert g.level is not None and g.level < -40
-    for _ in range(100):
-        g(True, -22.0)                       # then the person speaks: their louder voice takes over the level
+    retuned = False
+    for _ in range(20):
+        g(True, -22.0)                       # then the person speaks: their louder voice takes over within 0.3 s
+        retuned = retuned or g.retuned
     assert g.level > -30
+    assert retuned  # it said so once, so the line built from the TV is dropped
     assert not g(True, -45.0) or not g(True, -45.0) or not g(True, -45.0)  # and the TV is dropped again
 
 

@@ -474,8 +474,10 @@ class VoiceGate:
     """Is a voiced frame the person at this mic, or someone/something farther away (a TV, a roommate, a video)? The
     person at the mic is the loudest voice on it, so learn their level (90th percentile of the frames that passed, over
     their last ~60 s of speech) and drop frames more than `gate_db` below it. Only frames that pass are learned from, so
-    minutes of background can't pull the level down to its own; a louder voice raises it at once. Frames are compared by
-    their loudest neighbour (60 ms), so the quiet ends of the person's own words aren't cut."""
+    minutes of background can't pull the level down to its own. If the background came first (so its level was
+    learned), a voice 2/3 gate_db louder in most of half a second takes over at once and `retuned` is set. Frames are compared by
+    their loudest neighbour (60 ms), so the quiet ends of the person's own words aren't cut. `background` says whether
+    the latest frame was such a voice: the Listener sends silence in its place to transcription."""
 
     def __init__(self, gate_db=VOICE_GATE_DB, min_frames=25, keep=3000):
         self.gate_db, self.min_frames = gate_db, min_frames
@@ -484,19 +486,32 @@ class VoiceGate:
         self.level = None                # their speaking level (dBFS), None until min_frames of speech
         self.dropped = 0                 # voiced frames judged to be background
         self.n = 0                       # frames that passed
+        self.background = False          # the latest frame was a background voice
+        self.retuned = False             # the latest frame showed the level learned so far was the background's
+        self.louder = deque(maxlen=25)   # of the last voiced frames: far louder than the level?
 
     def __call__(self, voiced, db):
         """voiced: the VAD's verdict for this frame; db: its level. Returns the verdict after the gate."""
         self.recent.append(db)
+        self.background = self.retuned = False
         if not voiced:
             return False
         loud = max(self.recent)
         if self.gate_db > 0 and self.level is not None and loud < self.level - self.gate_db:
             self.dropped += 1
+            self.background = True
             return False
         self.hist.append(loud)
         self.n += 1
-        if len(self.hist) >= self.min_frames and (self.level is None or self.n % 10 == 0):  # every 0.2 s of speech
+        # most of the last half second far louder than the level learned: that was the background (on before they spoke)
+        self.louder.append(self.level is not None and loud > self.level + self.gate_db * 2 / 3)
+        if sum(self.louder) >= 15:
+            keep = [x for x in self.hist if x >= loud - self.gate_db]
+            self.hist.clear()
+            self.hist.extend(keep)
+            self.level, self.retuned = float(np.percentile(self.hist, 90)), True
+            self.louder.clear()
+        elif len(self.hist) >= self.min_frames and (self.level is None or self.n % 10 == 0):  # every 0.2 s of speech
             self.level = float(np.percentile(self.hist, 90))
         return True
 
@@ -943,6 +958,7 @@ class Listener:
         self.signals = None
         self.db, self.echo_frames = -90.0, 0
         self.voice_gate = VoiceGate()  # background voices on this mic (a TV, a roommate) aren't this person
+        self.recent_in = deque(maxlen=50)  # (frame, dB) of the last second, to re-judge on a retune
         self.run, self.quiet = 0.0, 99.0
         self.in_flight = 0       # committed lines not yet transcribed and judged
         self.last_voice = 0.0    # perf_counter of their last voiced frame
@@ -1007,6 +1023,25 @@ class Listener:
         if self.session is not None:
             await close(self.session)
 
+    async def _restart_line(self):
+        """The background was on before this person spoke, so the line being transcribed began with it: drop it and
+        send again only the last second (the person's start), re-judged against their real level."""
+        if self.open and self.session.close_code is None:
+            try:
+                await self.session.send({"type": "input_audio_buffer.clear"})
+            except Exception:  # noqa: BLE001
+                pass
+        self.backlog, self.line_audio, self.sent = [], [], 0
+        self.merge = self.gate.resumed = False  # and it doesn't continue the background's last line
+        self.gate.settle()
+        self.b.a.room.log({"type": "voice_gate", "slot": self.slot, "name": self.name, "event": "took over",
+                           "level_db": round(self.voice_gate.level, 1), "streaming": self.streaming})
+        if not self.streaming:
+            return
+        floor_db = self.voice_gate.level - self.voice_gate.gate_db
+        for f, db in list(self.recent_in)[:-1]:  # this frame is appended by tick()
+            await self._append(f if db >= floor_db else np.zeros_like(f))
+
     async def _append(self, pcm):
         self.sent += 1
         if LOCAL_STT is not None and len(self.line_audio) < 3000:  # 60 s
@@ -1031,6 +1066,12 @@ class Listener:
             self.speaking = False
             self.echo_frames += 1
         self.speaking = self.voice_gate(self.speaking, self.db)  # far quieter than their own voice: someone else
+        # what transcription hears: a background voice in this person's pauses becomes silence, so its words can't end
+        # up in their line ("So I paid everything this month. ... Hey, Higgs, can you hear me okay?")
+        heard = np.zeros_like(pcm) if self.voice_gate.background else pcm
+        self.recent_in.append((pcm, self.db))
+        if self.voice_gate.retuned:
+            await self._restart_line()
         if self.speaking:
             self.last_voice = time.perf_counter()
         # continuous speech (gaps under 0.25 s don't break it): a "mm" is short, taking the floor isn't
@@ -1048,13 +1089,13 @@ class Listener:
                 await self._append(f)
             self.preroll.clear()
         if self.streaming:
-            await self._append(pcm)
+            await self._append(heard)
             if BARGE and self.speaking:
                 self.since_check += TICK
                 if self.since_check >= BARGE_EVERY and not self.checking and self.cut is None:
                     self.b.check_so_far(self)
         else:
-            self.preroll.append(pcm)
+            self.preroll.append(heard)
         for act in self.gate.update(t, self.speaking, self.p_now):
             if act == "commit" and self.sent >= int(self.p.min_turn / TICK):
                 self.streaming, self.sent = False, 0
