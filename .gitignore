@@ -9,3 +9,4 @@ __pycache__/
 # regenerable test media (python tests/make_tracks.py B2) and external datasets (AMI, MSI-Bench)
 /tests/tracks/
 /data/
+/tests/data/tts3/

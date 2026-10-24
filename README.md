@@ -6,6 +6,31 @@ Higgs decides *whether* to speak (it stays out of conversations between people, 
 wrong facts) and *when* (it waits out thinking pauses, keeps talking through a listener's "mm-hm", stops for a real
 interruption). A switch on the call flips between the two so the difference can be heard live.
 
+## junaid3: what changed
+
+* **Knowledge base.** After creating a room (and in the call's side panel), upload PDF, DOCX, MD, TXT, CSV or HTML,
+  add a link or paste text. Documents are indexed (SQLite FTS5, `data/kb/`), key facts are extracted into a fact
+  sheet you can edit, replies are grounded in the documents and show their source.
+* **Verified corrections.** Every claim-like line is checked beside the conversation (`fact_monitor.py`) against the
+  fact sheet, the documents and what other people said earlier ("the plumber is coming Friday", Jordan, earlier).
+  A correction needs cited evidence that really exists in its source, confidence >= 0.8 and a 20 s cooldown. It cuts
+  in, ducks everyone else, holds the floor for 2 s (`MEET_CORRECTION_GUARD`), then yields only to someone who keeps
+  interrupting; what was said over it is answered afterwards.
+* **Fast, filler-proof interruptions.** While Higgs talks, a listener's speech is re-transcribed every ~0.3 s on a
+  probe session: "umm", "okay", "mm-hm" never stop it; a real interruption does (0.45 s live).
+* **Noise gate** on each person's speech detector (`noise_gate.py`, `MEET_NOISE_GATE`).
+* **LiveKit only for the avatar.** People's audio and video always use the WebSocket; LiveKit starts when the avatar
+  is turned on (browsers subscribe to the avatar only) and stops when it is turned off.
+* **Audit fixes** (MEET_RUNTIME_AUDIT.md): no silent stub when torch/faster-whisper are missing (those features just
+  switch off; `/api/config` says which agent runs); a judge's guess is never a "verified" correction; fact checks
+  can't hold up answers; the audio loop is supervised; the voice fallback never rewinds; the floor and ducking are
+  released when audio was heard, not sent; per-room avatar identities; pools rebuilt only when needed; shutdown
+  cancels all work; the browser recovers from failed avatar connections; `.env` keeps `MEET_*` settings.
+* From `main`: the fixed meeting link (`MEET_ROOM`) and the room-loop timing fix.
+
+Tests: `BOSON_API_KEY=unused python -m pytest tests/test_*.py` (offline, 139 tests);
+`python tests/live_junaid3.py` (6 live scenarios against Boson; `--only l6` for the avatar); `./run.sh check`.
+
 ## Setup
 
     python3.12 -m venv .venv && . .venv/bin/activate
