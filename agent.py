@@ -357,6 +357,11 @@ def english_word(w):
 NAME_AFTER_WEAK = set("said says is was has had will would thinks told and or are were".split())
 
 
+REQUEST_START = set("""just please can could would will do does did is are what what's how when where who why which tell
+give show set put walk run book add help remind check make let go take send get find sum summarize explain list read
+keep update switch handle remember note say""".split())
+
+
 def sound(w):
     """A rough sound key: h dropped, voiced/unvoiced pairs merged, doubled letters and vowel runs collapsed, so Higgs,
     hex, Hix, Hicks, Ex, X and Eggs all come out "aks", Nova "nafa", Noah "na"."""
@@ -502,9 +507,18 @@ def fix_name(text, ai, people=()):
     Noah, how are you?", "As long as we ask first, Hicks, what do you think?": 16 lines in the 2026-10-23 calls, none
     repaired by the old rule). A word that sounds like the name (`name_like`; closer in a weak spot) becomes the name
     where people call someone (`calling_spots`)."""
-    spans = [(a, b) for a, b, w, spot, _ in calling_spots(text) if name_like(w, ai, people, strong=spot == "strong")]
-    for a, b in reversed(spans):
-        text = text[:a] + ai + text[b:]
+    spans = []
+    for a, b, w, spot, _ in calling_spots(text):
+        nxt = re.match(r" ([A-Za-z']+)", text[b:])
+        # the name said straight into a request ("Assistant just set up his snack", MSI-Bench) reads as a vocative
+        # only with its comma: without it the judge took it as said to the group, 3 votes of 3 ("Max capacity is" no)
+        comma = spot == "weak" and nxt is not None and nxt.group(1).lower() in REQUEST_START
+        if w.lower() == ai.lower() and comma:
+            spans.append((a, b, ai + ","))
+        elif w.lower() != ai.lower() and name_like(w, ai, people, strong=spot == "strong"):
+            spans.append((a, b, ai + ("," if comma else "")))
+    for a, b, new in reversed(spans):
+        text = text[:a] + new + text[b:]
     return text
 
 

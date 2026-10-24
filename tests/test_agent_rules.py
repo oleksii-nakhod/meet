@@ -34,7 +34,8 @@ def test_fix_name_calls():
              ("Higgs", "Okay, house meeting. Hi, Hicks. How are you?", "Okay, house meeting. Hi, Higgs. How are you?"),
              ("Higgs", "As long as we ask first, Hicks, what do you think?",
               "As long as we ask first, Higgs, what do you think?"),
-             ("Nova", "Noah walk us through the rollout plan.", "Nova walk us through the rollout plan."),
+             ("Nova", "Noah walk us through the rollout plan.", "Nova, walk us through the rollout plan."),
+             ("Assistant", "Okay, enough. Assistant just set up his snack.", "Okay, enough. Assistant, just set up his snack."),
              ("Nova", "What do you think Noah?", "What do you think Nova?"),
              ("Max", "Mac, what do you think?", "Max, what do you think?")]
     for ai, said, want in fixed:
