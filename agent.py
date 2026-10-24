@@ -561,6 +561,8 @@ STOP_ASK = re.compile(r"^(?:(?:ok(?:ay)?|hey|um|uh)[,.]?\s+)?(?:stop(?: talking)
 REFUSAL = re.compile(r"\b(?:I|we) (?:can't|cannot|can not|won't|am unable to|'m unable to|'m not able to) (?:continue|keep) "
                      r"(?:this|the|our) (?:conversation|discussion|chat)|\bI (?:can't|cannot|won't) (?:engage|respond to (?:that|this))\b",
                      re.I)
+CLARIFY = re.compile(r"\b(?:not sure what you mean|(?:could|can) you (?:please )?(?:clarify|repeat|rephrase)|"
+                     r"didn't (?:quite )?catch (?:that|it)|what do you mean)\b", re.I)
 STAY = ("[Stay friendly and keep helping. If the remark was rude or strange, answer it lightly in a few words and carry "
         "on; never refuse to talk.]\n")
 WRITER = REPLY_SYS2
@@ -910,9 +912,14 @@ class Pool:
                         on_audio(bytes(buf[n:len(buf) // 2 * 2]))
                     ok = ev["response"].get("status") in (None, "completed")
                     return ok and len(buf) > 0
-                if cancelled():
-                    done.cancel()
+                if cancelled():  # the session goes back to the pool once the response has ended (closing it cost the
+                    # next reply a session open, 0.3-0.6 s: early reads of lines the judge then passed over drained it)
                     await s.send({"type": "response.cancel", "response_id": rid})
+                    try:
+                        await asyncio.wait_for(done, 3.0)
+                        ok = True
+                    except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                        done.cancel()
                     return False
                 await asyncio.sleep(0.03)
         except Exception:  # noqa: BLE001
@@ -1589,6 +1596,9 @@ class ImprovedBrain:
                 prev["text"] = join_pieces(prev["text"], tail) if tail_kind != "skip" else prev["text"]
                 if self.pending is not None and self.pending.held is li:
                     self.pending.held = None
+                if (self.paused is not None and self.paused["li"] is li and self.playing is None and self.pending is None
+                        and time.perf_counter() - self.paused["t"] < PAUSE_S):
+                    await self._resume(li, tail)  # the "mm-hm" that stopped a reply, joined to their last piece
                 owed = self.pending is not None and self.pending.listener is li
                 await a.line(li.slot, li.name, prev["text"], {"speak": owed, "why": f"went on: {tail_kind or 'backchannel'}",
                                                               "decided_s": 0.0}, True)
@@ -1734,6 +1744,14 @@ class ImprovedBrain:
             ans = (await writer.ask("[You already said that. Reply to the latest utterance with something new, "
                                             "briefly.]\n" + convo, retries=1)).strip().strip('"')
             t_draft = time.perf_counter()
+        if (ans and CLARIFY.search(ans) and mine and CLARIFY.search(mine[-1])
+                and not re.search(rf"\b{re.escape(a.ai)}\b", text, re.I)):
+            # it already asked what they meant: a second "Could you clarify?" to a garbled line is nagging (15 of them
+            # in the 2026-10-23 one-to-one calls)
+            if spec:
+                spec.speaker.cancel()
+            await a.room.event({"type": "reply_skipped", "line": text[:80], "why": "asked to clarify already"})
+            return
         correcting = BARGE and why.get("wrong")  # a correction is said even if people have moved on
         # a question put to the AI (by name, one-to-one) gets its answer even if it's the same as before ("I said,
         # Higgs, what do you think?"): 14 of 32 repeat skips in the 2026-10-23 calls were direct questions

@@ -59,9 +59,24 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
   - **Line end:** a line ends after 0.30 s of silence when the per-person turn-taking model (VAP) agrees the person
     is done; mid-thought pauses get held. If the person goes on, the pieces merge into one line (the transcript
     panel replaces the fragment).
-  - **Before judging** (`prefilter`): a misheard name is repaired ("Pigs, how should we…" → "Higgs, …"); backchannels
-    ("mm-hm", "yeah", "got it"), fillers ("um", "so the, uh,"), unfinished fragments and "stop / hold on" are logged
-    but not judged or answered, and don't make a reply someone else is waiting for stale.
+  - **The AI's name** (`fix_name`, 2026-10-24): Higgs STT often mishears it when someone calls the AI ("Hello, hex.",
+    "Hey, hey Noah, how are you?", "As long as we ask first, Hicks, what do you think?"; 16 lines in the
+    2026-10-23 calls, none answered). A word that *sounds* like the name (a rough sound key: Higgs = hex = Hix = Ex =
+    Eggs, Noah ≈ Nova), in a spot where people call someone (first word after greetings, between commas, after the
+    last comma, a capitalized last word, a sentence start going straight on but not "Noah said…"), becomes the name;
+    an ordinary English word (`/usr/share/dict/words`) only through a list of seen mishearings, and never a person in
+    the call. In a group call each line is also transcribed by local Whisper with the name as a hotword, and a line
+    whose Higgs transcript calls someone who isn't there ("Hi, Hank.", "What do you think, Kate?") waits up to 0.8 s
+    for it (`name_from_local`, logged `name_fix`; ~4 % of lines without the name). `tests/name_stt.py`: 756 calls of
+    Nova / Higgs / Max in 7 voices, clean and through a rough laptop mic, and 840 lines without the name ("No, I
+    don't think so.", "Noah said…", "hex code", "Max capacity…"): the name survives raw STT 88.4 %, the old rule
+    93.0 % (18 false names), now 96.2 % (0 false names; Higgs through the rough mic 57 % → 81 %). On the 1202 real
+    lines of 2026-10-23 it repairs 13 (the old rule 0).
+  - **Before judging** (`prefilter`): backchannels ("mm-hm", "yeah", "got it", up to 6 such words), fillers ("um",
+    "so the, uh,"), unfinished fragments and "stop / hold on" are logged but not judged or answered, and don't make a
+    reply someone else is waiting for stale. "Higgs, stop!" while it talks stops it (too short to count as an
+    interruption while it's said). A person called by name alone ("Alex." [pause] "your mic is noisy") owns the
+    next piece.
   - **Deciding:** judge v5 (`agent.DEC_SYS5`: Third Voice's v4b plus greetings, the AI's own name, follow-ups and an
     explicit one-to-one mode) on every line, 3 judge samples + 3 fact-checks. It decides as soon as 2 of 3 judges say
     speak; a failed Higgs request is an abstention, not a "no".
@@ -76,9 +91,19 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
     were heard ~0.2–0.3 s sooner that way (`./run.sh check`, 2026-10-23: ~1.3–1.4 s vs ~1.6–1.7 s after the line).
   - **Taking the floor:** a reply starts only when the room has been quiet for 0.35 s and nobody who just spoke
     still holds the floor. It is dropped if someone spoke after its line, or if it couldn't start within 3.5 s while
-    people kept talking (8 s in a quiet room). Every reply that was decided but not spoken logs `reply_skipped`.
+    people kept talking (8 s in a quiet room). If the asker goes on, the reply waits for what they add: a tail that is
+    only "Oh.", "Okay. Yes." or fillers keeps it, anything more is judged again with the line (a trailing "Oh."
+    restarted 20 replies on 2026-10-23, up to 8.8 s late). Every reply that was decided but not spoken logs
+    `reply_skipped` or `reply_dropped`; one whose voice never comes is dropped after 8 s.
+  - **What it won't say:** a question put to it (by name, one-to-one) is answered even if the answer repeats an
+    earlier one (14 of 32 repeat skips on 2026-10-23 were direct questions); a refusal ("I can't continue this
+    conversation.", after "are you dumb?") is re-asked and never enters the history (one locked Nova for the rest
+    of a call); a second "could you clarify?" in a row to a garbled line stays unsaid; a summary is given, not
+    promised, and invents no tasks.
   - **While Higgs talks:** a listener's "mm-hm" only ducks it. A real interruption stops it, and Higgs remembers
-    only what was heard (`floor.py`, ported from `mmhm/engine.py`; 16 unit tests).
+    only what was heard (`floor.py`, ported from `mmhm/engine.py`; 16 unit tests). When what stopped it comes back
+    transcribed as a backchannel ("Yeah, yeah, uh-huh, yeah.", "Exactly." — 5 replies were cut off that way on
+    2026-10-23), it goes on from the start of the sentence it was cut in (`MEET_RESUME`, `ai_resumed`, ~0.7 s pause).
   - **Barging in on a wrong fact** (`MEET_BARGE`, on by default): corrections don't wait for the floor. While someone
     talks, what they've said so far is transcribed locally (faster-whisper) every 0.8 s of speech (`MEET_BARGE_EVERY`)
     and fact-checked, with the correction drafted alongside; when every check says it contradicts the fact sheet,
