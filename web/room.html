@@ -66,6 +66,19 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
 .tile.ai video { opacity: 0; transition: opacity .15s; }
 .tile.ai.idle-on video.idle, .tile.ai.av-on video.live { opacity: 1; }
 .tile.ai.idle-on .orb, .tile.ai.av-on .orb { visibility: hidden; }
+/* live face (LiveKit): over the rendered/idle videos */
+.tile.ai video.lk { object-position: center 30%; }
+.tile.ai.lk-on video.lk { opacity: 1; }
+.tile.ai.lk-on video.idle, .tile.ai.lk-on video.live { opacity: 0; }
+.tile.ai.lk-on .orb { visibility: hidden; }
+/* interrupted: the face's pipeline still moves its lips for ~1.2 s; a still of it listening covers that */
+.tile.ai canvas.still { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center 30%;
+  opacity: 0; transition: opacity .25s; pointer-events: none; }
+.tile.ai.lk-on.still-on canvas.still { opacity: 1; transition: opacity .08s; }
+/* the live face answers ~2.7 s after a question (its pipeline alone is ~1.3 s): a glow says it heard you meanwhile */
+.tile.ai.lk-on.thinking::after, .tile.ai.lk-on.lk-wait::after { content: ""; position: absolute; inset: 0; border-radius: 14px;
+  pointer-events: none; box-shadow: inset 0 0 0 4px var(--ai), inset 0 0 40px rgba(185, 140, 255, .55); animation: lkthink 1.2s ease-in-out infinite; }
+@keyframes lkthink { 50% { opacity: .45; } }
 .tile.ai .badge { position: absolute; left: 8px; top: 8px; font-size: 12px; font-weight: 650; padding: 2px 9px; border-radius: 99px; background: rgba(0,0,0,.55); border: 1px solid var(--line); color: var(--muted); }
 .tile.ai .badge.improved { color: var(--ok); border-color: var(--ok); }
 .tile.ai .status { position: absolute; right: 8px; top: 8px; font-size: 12px; padding: 2px 9px; border-radius: 99px; background: rgba(0,0,0,.55); color: var(--muted); }
@@ -200,6 +213,7 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
   </footer>
 </section>
 <div id="toasts"></div>
+<div id="lkaudio" hidden></div>
 <script src="/agendas.js"></script>
 <script src="/room.js"></script>
 </body>

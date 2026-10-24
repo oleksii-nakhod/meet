@@ -78,6 +78,9 @@ async def run(a):
             if a.mode == "improved":
                 await asyncio.sleep(1)
                 await page.click("#modesw")
+            if a.avatar:  # the live face (LiveKit) when it's configured, else the rendered one
+                await asyncio.sleep(1)
+                await page.click("#avatar")
             while time.time() - t0 < total + 5:
                 await asyncio.sleep(1)
             await b.close()
@@ -85,10 +88,13 @@ async def run(a):
         srv.terminate()
     log = [json.loads(x) for x in open(os.path.join(MEET, "out", "rooms", f"{rid}.jsonl"))]
     stops = [e for e in log if e.get("type") == "ai_state" and e.get("stopped")]
+    resumed = [e for e in log if e.get("type") == "ai_resumed"]
+    live = [(e["on"], e.get("start_s") or e.get("why")) for e in log if e.get("type") == "live_avatar"]
     lines = [e["text"] for e in log if e.get("type") == "line"]
     says = [e for e in log if e.get("type") == "ai_say"]
     res = {"mode": a.mode, "gain_db": a.gain_db, "cue_at": a.cue_at, "rounds": len(plan), "replies": len(says),
-           "stops": len(stops), "stopped_why": [s.get("stopped") for s in stops], "lines": lines, "room": rid}
+           "stops": len(stops), "stopped_why": [s.get("stopped") for s in stops], "resumed": len(resumed),
+           "live_avatar": live, "lines": lines, "room": rid}
     print(json.dumps(res, indent=1))
     json.dump(res, open(os.path.join(MEET, "out", f"browser_bc_{a.mode}_{a.gain_db:+.0f}.json"), "w"), indent=1)
 
@@ -100,4 +106,5 @@ if __name__ == "__main__":
     ap.add_argument("--gain-db", type=float, default=0.0)
     ap.add_argument("--lead", type=float, default=12.0)
     ap.add_argument("--port", type=int, default=8660)
+    ap.add_argument("--avatar", action="store_true", help="turn the avatar on (the live face with LiveKit set)")
     asyncio.run(run(ap.parse_args()))

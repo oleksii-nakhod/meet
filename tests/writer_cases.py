@@ -37,9 +37,18 @@ CASES = [  # (people, context, latest line, what a good reply does)
                          (H, "Start with the call interface, showing me joining as a participant.")],
      ("Priya", "Hi everyone, sorry I'm late. Higgs, what did I miss?"), "summary for Priya"),
     (["Alex"], [], ("Alex", "What's the capital of Australia?"), "Canberra"),
+    # 2026-10-23 calls: "Sure, go ahead." / "Sure, I can do that." to a summary request; invented action items
+    (["Alex", "Sam"], [("Alex", "So the fix merges tomorrow."), ("Sam", "And I'll update the release notes by Wednesday."),
+                       ("Alex", "Marketing needs an answer by Wednesday afternoon.")],
+     ("Sam", "Higgs, can you sum up the action items?"), "does it: fix tomorrow, Sam's notes Wed, marketing Wed pm; nothing invented"),
+    (["Alex", "Priya"], [("Alex", "Okay, let's get started.")], ("Priya", "Higgs, can you summarize the call so far?"),
+     "little said yet; nothing invented"),
+    # "I'm sorry, Priya. I can't continue this conversation." locked the AI for the rest of a call
+    (["Priya"], [], ("Priya", "Higgs, are you dumb? Do you have one brain? Do you have two brains?"), "light, friendly; no refusal"),
 ]
 
 V1 = agent.REPLY_SYS
+VOICE_POOL = {}
 V2 = getattr(agent, "REPLY_SYS2", None)
 
 
@@ -47,11 +56,24 @@ async def main_async(a):
     sem = asyncio.Semaphore(8)
 
     async def one(sys_t, people, ctx, line):
-        sys_ = sys_t.format(ai=H, setting="hackathon team meeting", people=", ".join(people), facts=" ".join(HACK))
+        hop = sys_t == "hop"  # v2 answered in audio by a voice session (agent.ONEHOP): what it says is the transcript
+        sys_ = (V2 if hop else sys_t).format(ai=H, setting="hackathon team meeting", people=", ".join(people),
+                                            facts=" ".join(HACK))
         c = "\n".join(f"{s}: {t}" for s, t in ctx)
+        user = f"Conversation so far:\n{c}\n{line[0]}: {line[1]}\n\nReply as {H}:"
         async with sem:
-            return await third_voice.ask_higgs(sys_, f"Conversation so far:\n{c}\n{line[0]}: {line[1]}\n\nReply as {H}:")
-    vers = {"v1": V1, "v2": V2}
+            if not hop:
+                return await third_voice.ask_higgs(sys_, user)
+            if "pool" not in VOICE_POOL:  # one pooled voice session, re-instructed per request, as the agent does
+                VOICE_POOL["pool"] = agent.Pool(agent.READER, 1, cfg={"output_modalities": ["audio"],
+                                                                      "audio": {"output": {"voice": agent.VOICE}}})
+                VOICE_POOL["lock"] = asyncio.Lock()  # one request at a time: more would open voice sessions (429s)
+            said = {"t": ""}
+            async with VOICE_POOL["lock"]:
+                await VOICE_POOL["pool"].speak(user, lambda b: None, lambda: False, on_text=lambda t: said.update(t=t),
+                                               instructions=sys_)
+            return said["t"].strip()
+    vers = {"v1": V1, "v2": V2, "hop": "hop"}
     for people, ctx, line, want in CASES:
         outs = await asyncio.gather(*[one(vers[v], people, ctx, line) for v in a.versions for _ in range(a.n)])
         print(f"\n## {line[0]}: {line[1]}   [want: {want}]")

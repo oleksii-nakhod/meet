@@ -1,5 +1,6 @@
 // Meet room page. Two sockets: /ws/room (control JSON + 20 ms audio frames, 1 byte slot + Int16 PCM at 24 kHz)
 // and /ws/video (camera JPEGs, 1 byte slot + JPEG; slot 0 = the AI's avatar as fMP4 chunks for a MediaSource).
+// With a live face (live_avatar message) the AI tile plays the avatar's own video and audio from LiveKit instead.
 // Slot 0 is the AI, 1..5 are people. window.meet holds counters for tests.
 const $ = (id) => document.getElementById(id);
 const RID = decodeURIComponent(location.pathname.split("/").pop());
@@ -8,7 +9,7 @@ const LAB = QS.has("lab");
 const MODE_LABEL = { default: "default Higgs", improved: "Mm-hm + Third Voice" };
 const W = (window.meet = { audioRx: {}, videoRx: {}, msgs: {}, errors: [], audioTx: 0, videoTx: 0, videoSkip: 0,
   peak: [], roster: null, slot: null, ai: { mode: "default", avatar: false, status: "listening" }, levels: [], gain0: 1,
-  avatar: { starts: 0, chunks: 0, played: 0 } });
+  avatar: { starts: 0, chunks: 0, played: 0 }, live: { state: "off", connects: 0, video: 0, audio: 0, flushes: 0 } });
 const store = (s, k, v) => { try { if (v === undefined) return s.getItem(k); s.setItem(k, v); } catch { return null; } };
 const wsUrl = (p) => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${p}`;
 const bump = (o, k) => (o[k] = (o[k] || 0) + 1);
@@ -133,7 +134,9 @@ function connect() {
 
 function onMessage(e) {
   if (typeof e.data !== "string") {
-    bump(W.audioRx, new Uint8Array(e.data, 0, 1)[0]);
+    const slot = new Uint8Array(e.data, 0, 1)[0];
+    bump(W.audioRx, slot);
+    if (slot === 0 && live.audio) return; // the live face says the same words, in sync with its lips
     mixer.port.postMessage(e.data, [e.data]);
     return;
   }
@@ -141,12 +144,22 @@ function onMessage(e) {
   bump(W.msgs, m.type);
   if (m.type === "roster") onRoster(m);
   else if (m.type === "chat") addChat(m);
-  else if (m.type === "ai_flush") mixer.port.postMessage({ flush: 0 });
-  else if (m.type === "ai_gain") mixer.port.postMessage({ gain: Math.max(0, Math.min(1, +m.gain)), slot: 0, ramp: 0.03 });
+  else if (m.type === "ai_flush") { // a caption still waiting for the face never showed: its update is a new line
+    mixer.port.postMessage({ flush: 0 }); liveFlush();
+    if (live.cap) { clearTimeout(live.cap); live.cap = null; live.unshown = true; }
+  }
+  else if (m.type === "ai_gain") { live.gain = Math.max(0, Math.min(1, +m.gain)); mixer.port.postMessage({ gain: live.gain, slot: 0, ramp: 0.03 }); liveVolume(); }
+  else if (m.type === "live_avatar") liveAvatar(m);
   else if (m.type === "ai_state") onAiState(m);
   else if (m.type === "line") addLine(m);
   else if (m.type === "ai_note") toast(m.text, "mode");
-  else if (m.type === "ai_say") aiSay(m.text);
+  else if (m.type === "ai_say") { // with the face's words; an update completes the line before it (one-hop transcript)
+    const merge = !!m.update && !live.unshown; // replace the line it completes, if that one was shown
+    live.unshown = false;
+    if (m.update && live.cap) { clearTimeout(live.cap); live.cap = null; aiSay(m.text, live.capMerge); } // not shown yet
+    else if (live.video) { live.capMerge = merge; live.cap = setTimeout(() => { live.cap = null; aiSay(m.text, merge); }, 1300); }
+    else aiSay(m.text, merge);
+  }
   else if (m.type === "lab") lab(m);
   else if (m.type === "script") setStep(m.step, false);
 }
@@ -170,6 +183,7 @@ function onRoster(m) {
   $("side").querySelector("h3").textContent = `Transcript · what ${aiName} heard and decided`;
   $("count").textContent = `${m.people.length} ${m.people.length === 1 ? "person" : "people"} + ${aiName}`;
   renderTiles(m);
+  liveAttach();
   onAiState({ ...m.ai, type: "ai_state" });
   if (!vws || vws.readyState > 1) connectVideo();
 }
@@ -180,7 +194,7 @@ function makeTile(slot) {
   t.className = "tile"; t.dataset.slot = slot;
   if (slot === 0) {
     t.classList.add("ai");
-    t.innerHTML = `<video class="idle" muted playsinline loop></video><video class="live" muted playsinline></video>
+    t.innerHTML = `<video class="idle" muted playsinline loop></video><video class="live" muted playsinline></video><video class="lk" muted playsinline autoplay></video><canvas class="still"></canvas>
       <div class="orb"><div class="ring"></div><span></span></div><div class="badge"></div><div class="status"></div>
       <div class="cap"></div><div class="name"></div>`;
   } else {
@@ -254,6 +268,7 @@ function lab(m) {
 function onAiState(m) {
   const prev = W.ai;
   W.ai = { mode: m.mode ?? prev.mode, avatar: m.avatar ?? prev.avatar, status: m.status ?? prev.status };
+  if (prev.status === "speaking" || W.ai.status === "speaking") live.talkedAt = performance.now(); // liveSnap
   if (m.by && W.ai.mode !== prev.mode) toast(`${m.by} switched ${aiName} to ${MODE_LABEL[W.ai.mode]}`, "mode");
   if (W.ai.status === "connecting" && prev.status !== "connecting") toast(`${aiName} is reconnecting…`, "mode");
   if (m.by && W.ai.avatar !== prev.avatar) toast(`${m.by} turned ${aiName}'s avatar ${W.ai.avatar ? "on" : "off"}`, "mode");
@@ -267,16 +282,21 @@ function onAiState(m) {
   b.textContent = MODE_LABEL[W.ai.mode] || W.ai.mode; b.classList.toggle("improved", W.ai.mode === "improved");
   t.querySelector(".status").textContent = W.ai.status;
   for (const s of ["listening", "thinking", "speaking"]) t.classList.toggle(s, W.ai.status === s);
+  if (W.ai.status === "speaking" && prev.status !== "speaking" && live.video) { // the face says it ~1.3 s from now
+    t.classList.add("lk-wait");
+    clearTimeout(onAiState.wait);
+    onAiState.wait = setTimeout(() => t.classList.remove("lk-wait"), 1300);
+  } else if (W.ai.status !== "speaking") t.classList.remove("lk-wait");
   t.classList.toggle("idle-on", W.ai.avatar && !!t.querySelector("video.idle").src);
   if (W.ai.status !== "speaking") setTimeout(() => W.ai.status !== "speaking" && (t.querySelector(".cap").textContent = ""), 4000);
 }
 
-function aiSay(text) {
+function aiSay(text, update) {
   const t = tiles[0];
   clearTimeout(aiSay.timer);
   aiSay.timer = setTimeout(() => W.ai.status !== "speaking" && tiles[0] && (tiles[0].querySelector(".cap").textContent = ""), 8000);
   if (t) { t.querySelector(".cap").innerHTML = ""; const s = document.createElement("span"); s.textContent = text; t.querySelector(".cap").appendChild(s); }
-  addLine({ slot: 0, name: aiName, text });
+  addLine({ slot: 0, name: aiName, text, ...(update ? { merge: true } : {}) }); // merge: replaces its last line
 }
 
 // ---------- side panel ----------
@@ -309,8 +329,10 @@ function addLine(m) {
     const rest = Object.entries(d).filter(([k]) => k !== "speak" && k !== "why").map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`);
     extra.append(c, [d.why, ...rest].filter(Boolean).join(" · "));
   }
-  if (m.merge) {  // the same person went on after a pause: their last line becomes the whole line
-    const prev = [...$("lines").querySelectorAll("li")].reverse().find((x) => x.dataset.slot === String(m.slot));
+  if (m.merge || m.moved_from != null) {  // they went on after a pause: their last line becomes the whole line;
+    // moved_from: the line was taken as someone else's (their mic heard it too, quieter): it moves to who said it
+    const from = String(m.moved_from ?? m.slot);
+    const prev = [...$("lines").querySelectorAll("li")].reverse().find((x) => x.dataset.slot === from);
     if (prev) prev.remove();
   }
   addItem("lines", m.slot === 0 ? "ai" : "", m.name || "", m.text, extra, m.slot);
@@ -394,6 +416,100 @@ function avatarIdle(url) {
   v.src = url; v.play().catch(() => {});
   tiles[0].classList.toggle("idle-on", W.ai.avatar);
 }
+
+// Live face (live_avatar.py): a Boson avatar in a LiveKit room, joined subscribe-only with the token the server sends.
+// It is heard ~1.3 s after the server sends slot 0's audio, and after ai_flush the avatar's pipeline still plays
+// ~1.2 s, so a flush mutes it here for `drain` s.
+const live = { room: null, info: null, audio: null, video: null, gain: 1, mutedUntil: 0, timer: null, still: false,
+  talkedAt: 0, snapper: null };
+function loadLivekit() {
+  if (window.LivekitClient) return Promise.resolve();
+  return (loadLivekit.p ||= new Promise((ok, bad) => {
+    const s = Object.assign(document.createElement("script"), { src: "/vendor/livekit-client.umd.js" });
+    s.onload = ok; s.onerror = () => { loadLivekit.p = null; bad(new Error("livekit-client did not load")); };
+    document.head.appendChild(s);
+  }));
+}
+async function liveAvatar(m) {
+  if (!m.on) { liveOff(); return; }
+  if (live.room && live.info?.room === m.room) return; // the same session (the control socket reconnected)
+  liveOff();
+  live.info = m; W.live.state = "connecting";
+  try {
+    await loadLivekit();
+    const L = window.LivekitClient, r = (live.room = new L.Room({ adaptiveStream: false, dynacast: false }));
+    r.on(L.RoomEvent.TrackSubscribed, (track, pub, p) => {
+      if (live.room !== r || p.identity !== m.identity) return;
+      if (track.kind === "video") { // full size: LiveKit sends the 240x320 simulcast layer otherwise
+        pub.setVideoQuality?.(L.VideoQuality.HIGH);
+        live.video = track; W.live.video++; liveAttach();
+      } else if (track.kind === "audio") {
+        const a = track.attach();
+        $("lkaudio").replaceChildren(a);
+        live.audio = a; liveVolume(); W.live.audio++;
+        mixer.port.postMessage({ flush: 0 }); // drop slot 0 audio already queued from the socket
+      }
+    });
+    r.on(L.RoomEvent.TrackUnsubscribed, (track) => {
+      if (live.room !== r) return;
+      if (track.kind === "audio") { live.audio = null; $("lkaudio").replaceChildren(); }
+      else { live.video = null; tiles[0]?.classList.remove("lk-on"); }
+      track.detach();
+    });
+    r.on(L.RoomEvent.Disconnected, () => live.room === r && liveOff());
+    await r.connect(m.url, m.token, { autoSubscribe: true });
+    if (live.room !== r) { r.disconnect(); return; }
+    W.live.connects++; W.live.state = "on";
+    r.startAudio().catch(() => {}); // the Join click already allowed sound; if not, the next click does (below)
+  } catch (e) { // a connect that a newer live_avatar message replaced fails on its own: leave the newer one be
+    if (live.info !== m) return;
+    W.errors.push(`live avatar: ${e.message || e}`); liveOff(); W.live.state = "failed";
+  }
+}
+function liveOff() {
+  const r = live.room;
+  clearInterval(live.snapper);
+  Object.assign(live, { room: null, info: null, audio: null, video: null, still: false, snapper: null });
+  tiles[0]?.classList.remove("still-on");
+  if (r) r.disconnect();
+  $("lkaudio")?.replaceChildren();
+  tiles[0]?.classList.remove("lk-on");
+  const v = tiles[0]?.querySelector("video.lk");
+  if (v) v.srcObject = null;
+  W.live.state = "off";
+}
+function liveAttach() { // the video track can arrive before the AI tile exists
+  const v = tiles[0]?.querySelector("video.lk");
+  if (!live.video || !v || v.srcObject) return;
+  live.video.attach(v); v.play().catch(() => {});
+  tiles[0].classList.add("lk-on");
+  clearInterval(live.snapper);
+  live.snapper = setInterval(liveSnap, 1000);
+}
+function liveVolume() {
+  if (!live.audio) return;
+  live.audio.volume = live.gain;
+  live.audio.muted = performance.now() < live.mutedUntil;
+}
+function liveFlush() {
+  if (!live.audio) return;
+  W.live.flushes++;
+  const drain = 1000 * (live.info?.drain ?? 1.25);
+  live.mutedUntil = performance.now() + drain;
+  liveVolume();
+  // the lips would go on silently for the drain: show the face as it last listened, then the live face again
+  if (live.still) tiles[0]?.classList.add("still-on");
+  clearTimeout(live.timer);
+  live.timer = setTimeout(() => { liveVolume(); tiles[0]?.classList.remove("still-on"); }, drain + 20);
+}
+function liveSnap() { // a still of the live face while it listens (mouth closed), for liveFlush
+  const v = tiles[0]?.querySelector("video.lk"), c = tiles[0]?.querySelector("canvas.still");
+  if (!live.video || !v || !c || !v.videoWidth || W.ai.status === "speaking") return;
+  if (performance.now() - live.talkedAt < 3000 || tiles[0].classList.contains("still-on")) return; // still saying the end
+  if (c.width !== v.videoWidth) { c.width = v.videoWidth; c.height = v.videoHeight; }
+  try { c.getContext("2d").drawImage(v, 0, 0, c.width, c.height); live.still = true; } catch { /* not ready */ }
+}
+document.addEventListener("click", () => live.room && !live.room.canPlaybackAudio && live.room.startAudio().catch(() => {}));
 
 // ---------- script ----------
 const EXPECT = { reply: "{ai} answers", silent: "{ai} stays quiet", correct: "{ai} corrects it", continue: "{ai} keeps talking",

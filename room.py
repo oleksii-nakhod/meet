@@ -7,8 +7,15 @@ video keeps only the newest pending frame per sender.
 
 The agent (agent.HiggsAgent, or stub_agent.HiggsAgent when that is missing) gets:
   room.brief, room.people(), room.mode, room.avatar, room.status  (plain attributes / sync)
+  room.live, room.live_state  (the live face, below)
   await room.send_ai_audio(pcm), ai_flush(), ai_gain(g), event(d), ai_status(s),
-        send_avatar_chunk(b), avatar_start(mime), avatar_stop(), avatar_idle(url)   (enqueue only, never block)"""
+        send_avatar_chunk(b), avatar_start(mime), avatar_stop(), avatar_idle(url)   (enqueue only, never block)
+
+Live face (live_avatar.py, when LiveKit is configured): while the avatar is on and someone is in the room, the room
+keeps a realtime Boson avatar session in a LiveKit room. Everything sent to slot 0 also goes to it (ai_flush clears
+it), and each page gets a subscribe-only token (`live_avatar` message) to play the avatar's video and audio on the
+AI tile instead of slot 0's audio. live_state: None (off / not configured), "starting", "on", "failed" (the agent
+then falls back to rendered video); agent.set_avatar() is called again whenever it changes."""
 import asyncio
 import json
 import os
@@ -22,6 +29,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(HERE, "out", "rooms")
 MAX_HUMANS = 5
 FRAME = 960  # 20 ms of int16 at 24 kHz
+
+try:
+    import live_avatar
+    LIVE = live_avatar.settings()
+except ImportError as e:  # livekit-agents not installed: rendered faces only
+    live_avatar, LIVE = None, None
+    print(f"live avatar off: {e}", flush=True)
 
 if os.environ.get("MEET_AGENT") == "stub":  # the call-layer tests: no Higgs calls
     from stub_agent import HiggsAgent
@@ -152,6 +166,7 @@ class Room:
         self.humans = {}  # slot -> Human
         self.last_slot = {}  # pid -> slot it had, so a reconnect gets the same tile back
         self.idle_url = None
+        self.live, self.live_state, self._live_task = None, None, None
         self.created = time.time()
         os.makedirs(LOG_DIR, exist_ok=True)
         self.log_path = os.path.join(LOG_DIR, f"{self.id}.jsonl")
@@ -165,10 +180,14 @@ class Room:
 
     async def send_ai_audio(self, pcm: bytes):
         b = b"\x00" + bytes(pcm)
+        if self.live:
+            self.live.push(b[1:])
         for h in list(self.humans.values()):
             h.out.lossy(b)
 
     async def ai_flush(self):
+        if self.live:
+            self.live.clear()
         self._all({"type": "ai_flush"})
 
     async def ai_gain(self, g):
@@ -199,6 +218,68 @@ class Room:
     async def avatar_idle(self, url):
         self.idle_url = url
         self._video(json.dumps({"type": "avatar_idle", "url": url}))
+
+    # ---- the live face ----
+    def _live_sync(self):
+        """Start or end the live avatar to match: avatar on, someone here, LiveKit configured."""
+        want = bool(LIVE and self.avatar and self.humans)
+        if want and self.live_state is None and not self._live_task:
+            self.live_state = "starting"  # now: the agent mustn't set up a rendered face meanwhile
+            self._live_task = asyncio.ensure_future(self._live_run())
+        elif not want:
+            if self._live_task:
+                self._live_task.cancel()  # its finally closes the session
+            elif self.live_state == "failed":
+                self._set_live(None, None)
+
+    async def _live_run(self):
+        """Hold a live avatar while it's wanted; a session that ends (expired, Boson, network) is replaced."""
+        la, tries = None, 0
+        try:
+            while True:
+                self._set_live(None, "starting")
+                la = live_avatar.LiveAvatar(self.id, LIVE)
+                try:
+                    took = await la.start()
+                except Exception as e:  # noqa: BLE001  (no LiveKit / no capacity: rendered faces instead)
+                    await la.close()
+                    la = None
+                    tries += 1
+                    await self.event({"type": "ai_error", "error": f"live avatar: {e!r}"[:300]})
+                    if tries >= 3:
+                        self._set_live(None, "failed")
+                        return
+                    await asyncio.sleep(2.0 * tries)
+                    continue
+                tries = 0
+                self.log({"type": "live_avatar", "on": True, "start_s": round(took, 2), "room": la.room_name})
+                self._set_live(la, "on")
+                await la.dead.wait()
+                self.log({"type": "live_avatar", "on": False, "why": "ended", "frames": la.frames})
+                self._set_live(None, "starting")
+                await la.close()
+                la = None
+        except asyncio.CancelledError:
+            if self.live_state != "failed":
+                self._set_live(None, None)
+        finally:
+            self._live_task = None
+            if la is not None:
+                self.log({"type": "live_avatar", "on": False, "why": "off", "frames": la.frames})
+                asyncio.ensure_future(la.close())
+
+    def _set_live(self, la, state):
+        was = self.live
+        self.live, self.live_state = la, state
+        if la is not None:
+            for h in list(self.humans.values()):
+                h.out.json(self._live_msg(h))
+        elif was is not None:
+            self._all({"type": "live_avatar", "on": False})
+        self._safe(self.agent.set_avatar, self.avatar)
+
+    def _live_msg(self, h):
+        return {"type": "live_avatar", "on": True, "drain": round(self.live.drain, 2), **self.live.viewer(h.slot)}
 
     # ---- internals ----
     def ai_state(self):
@@ -256,6 +337,8 @@ class Room:
         self.last_slot[pid] = slot
         self.log({"type": "join", "slot": slot, "name": name, "rejoin": bool(old)})
         h.out.json(self.ai_state())
+        if self.live:
+            h.out.json(self._live_msg(h))
         if self.agenda:
             h.out.json({"type": "script", "step": self.script_step})
         self.roster()
@@ -293,6 +376,7 @@ class Room:
                     await self.agent.stop()
             except Exception as e:
                 self.log({"type": "agent_error", "where": "lifecycle", "error": repr(e)})
+            self._live_sync()
 
     def on_audio(self, h, pcm):
         if len(pcm) != FRAME:
@@ -317,6 +401,7 @@ class Room:
         elif t == "set_avatar":
             self.avatar = bool(m.get("on"))
             await self.event({**self.ai_state(), "by": h.name})
+            self._live_sync()
             self._safe(self.agent.set_avatar, self.avatar)
         elif t == "script" and isinstance(m.get("step"), int) and 0 <= m["step"] < 1000:
             self.script_step = m["step"]

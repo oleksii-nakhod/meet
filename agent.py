@@ -16,6 +16,7 @@ Every Higgs request is counted (CALLS); above MEET_BUDGET the agent stops asking
 import asyncio
 import base64
 import dataclasses
+import itertools
 import os
 import re
 import threading
@@ -55,6 +56,7 @@ SIGNALS = os.environ.get("MEET_SIGNALS", "1") == "1"  # per-person turn-taking m
 STT_FALLBACK = os.environ.get("MEET_STT_FALLBACK", "1") == "1"
 STT_WAIT = float(os.environ.get("MEET_STT_WAIT", "1.0"))
 STT_FAILED = re.compile(r"transcription is not available", re.I)
+WHISPER_JUNK = re.compile(r"^\W*(?:you|thank you|thanks for watching)?\W*$", re.I)
 CALLS = {"n": 0}
 # In 1:1 Mm-hm a commit after 0.1 s of silence is a cancellable guess. Here a committed line is transcribed and judged
 # (7 requests) and shown to everyone, so a line ends only after a real pause: 0.45 s with the turn-taking model
@@ -67,6 +69,11 @@ FLOOR_POLICY = dataclasses.replace(Policy(), min_silence=0.35)  # room quiet bef
 STALE_S = 3.5  # a reply that couldn't start this long after its line, while people kept talking, is about a moment
 STALE_ADDRESSED = 6.0  # an answer to a question put to the AI by name waits longer for a gap
 STALE_MAX = 8.0  # that has passed; in a quiet room it may come later (a slow Higgs request), but not after this
+# A reply stopped by someone whose line then turns out to be a backchannel goes on from the sentence it was cut in, if
+# that line comes within PAUSE_S of the stop (0.3 s line end + STT: ~0.7 s after they stop). MEET_RESUME=0: it doesn't.
+RESUME = os.environ.get("MEET_RESUME", "1") == "1"
+PAUSE_S = 3.0
+HELD_S = 1.2  # a reply held because its speaker went on (on_resume) goes ahead after this much quiet with no new line
 CORRECT = ("[The latest utterance contradicts what you know. Start by correcting it plainly, as {ai}, not as one of "
            "the people.]\n")
 # Barging in on a wrong fact (2026-10-23): a correction doesn't wait for the floor, it talks over people. While someone
@@ -98,7 +105,10 @@ REPLY_SYS2 = ("You are {ai}, an AI participant with a voice in an online meeting
               "latest utterance, and don't repeat what was already said. A turn of yours marked [interrupted] was cut "
               "off: answer what the person who interrupted said (if they only want to speak, say something like "
               "\"Sure, go ahead.\"), and don't go back to it unless asked. You can answer, remind, summarize and "
-              "suggest, but you can't do work outside the call, so don't volunteer for tasks. Say what a helpful "
+              "suggest, but you can't do work outside the call, so don't volunteer for tasks. When asked for something "
+              "you can do here (a summary, the action items, an answer), do it in this reply instead of saying you will, "
+              "and use only what was said in the meeting and what you know: no made-up names, tasks or decisions. "
+              "Say what a helpful "
               "teammate would say: one or two short spoken sentences, under 30 words, no lists, no preamble.")
 PERSONA = ("You are {ai}, an AI participant with a voice in an online meeting ({setting}) with {people}. "
            "What you know: {facts} Keep each reply to one or two short spoken sentences.")
@@ -122,15 +132,16 @@ class LocalSTT:
         finally:
             self.ready.set()
 
-    def transcribe(self, pcm24k):
-        """int16 24 kHz -> text ("" if the model isn't there). Blocking: run it in a thread."""
+    def transcribe(self, pcm24k, hot=None):
+        """int16 24 kHz -> text ("" if the model isn't there). hot: a word to listen for (the AI's name). Blocking:
+        run it in a thread."""
         from scipy.signal import resample_poly
         self.ready.wait(30)
         if self.model is None or not len(pcm24k):
             return ""
         x = resample_poly(pcm24k.astype(np.float32) / 32768, 2, 3)  # Whisper wants 16 kHz
         segs, _ = self.model.transcribe(x, language="en", beam_size=1, condition_on_previous_text=False,
-                                        without_timestamps=True)
+                                        without_timestamps=True, **({"hotwords": hot} if hot else {}))
         return " ".join(seg.text.strip() for seg in segs).strip()
 
 
@@ -227,7 +238,9 @@ def judge_rule(d, r, prompt="v4b"):
     ctx, cur = r["context_turns"], r["current_turn"]["text"]
     if len(r["people"]) == 1 and to == "group":
         to = "me"  # one-to-one: there is no group (the 1:1 prompt doesn't offer it; a single vote sometimes says it)
-    who = vocative_person(cur, [p for p in r["people"] if p != r["current_turn"]["speaker"]], r["target_speaker"])
+    others = [p for p in r["people"] if p != r["current_turn"]["speaker"]]
+    who = vocative_person(cur, others, r["target_speaker"]) or person_called_before(
+        ctx, r["current_turn"]["speaker"], others, r["target_speaker"], cur)
     if who:
         to = "person"  # "Alex, I can barely hear you.": said to Alex, however the judge read it
     if (to == "me" and len(r["people"]) > 1 and r["target_speaker"].lower() not in cur.lower()
@@ -288,6 +301,14 @@ async def decide(r, ask, samples=3, prompt="v4b"):
     reading = dict(parsed[0] if parsed else {})
     if wrong:
         reading["wrong"] = True
+    cur, ai = r["current_turn"], r["target_speaker"]
+    called = any(w.lower() == ai.lower() for _, _, w, _, _ in calling_spots(cur["text"]))  # not "I asked Higgs yesterday"
+    if not parsed and (len(r["people"]) == 1 or called or named_ai_before(r["context_turns"], cur["speaker"], ai)):
+        # every judge request failed (a Higgs hiccup): a line put to the AI is answered, not dropped as "nothing
+        # asked" ("Higgs." [pause] "Quick one, how long can the video be?" went unanswered, 0 votes)
+        return True, {"reading": {"to": "me", **({"wrong": True} if wrong else {})}, "why": "asked me (judge unavailable)",
+                      "votes": 0,
+                      "checks": [p.get("contradicts") for p in checks]}
     return speak, {"reading": reading, "why": reason(reading, speak), "votes": len(parsed), "checks":
                    [p.get("contradicts") for p in checks]}
 
@@ -307,36 +328,265 @@ DANGLING = set("the a an to of and but or because if my your our their than um u
 
 
 def backchannel(text):
-    """True for a short listener sound or acknowledgement ("Mm-hm.", "Yeah, yeah.", "Okay.", "Got it."), but not for
+    """True for listener sounds or acknowledgements ("Mm-hm.", "Yeah, yeah.", "Okay.", "Got it.", "Yeah. Yeah. Uh huh. Yeah."), not for
     one asked as a question ("Yeah?", "Right?")."""
     t = text.strip().lower()
     words = re.findall(r"[a-z][a-z'-]*", t)
-    return bool(words) and len(words) <= 3 and not t.endswith("?") and all(w in BACKCHANNEL for w in words)
+    return bool(words) and len(words) <= 6 and not t.endswith("?") and all(w in BACKCHANNEL for w in words)
+
+
+# Words said before the AI's name when calling it ("Hey, hey Noah, how are you?", "Okay, Higgs.", "Morning, all. Nova").
+NAME_LEAD = set("hey hi hello okay ok so and um uh oh well yo morning good thanks thank sorry right alright".split())
+# Common words that sound like some AI name but are what they say ("No, I don't think so.", "Now, what do we do?").
+NOT_NAME = set("""no now know knew new next nah not nope note need never so see say says said sure saw yes yeah yep
+yup ok okay well wait what why who how hey hi hello thanks right alright guys folks everyone all hmm um uh oh ah
+maybe make made mike mix makes mind nice nine none nor north noise noon nothing nobody novel
+his hers he high hike highs ideas egg exit exact exactly extra excuse monday tuesday wednesday thursday friday saturday
+sunday january february april june july august september october november december""".split())
+# Mishearings seen in real calls (2026-10-23, out/rooms) that the sound rule alone scores too low or that are in NOT_NAME
+NAME_ALIASES = {"higgs": {"hex", "hix", "hicks", "hics", "ex", "x", "eggs", "pig", "pigs", "figs", "higs", "hig", "ahex"},
+                "nova": {"noah", "nava", "novo", "nover", "noba", "nola", "noa", "nowa", "nobel"},
+                "max": {"mac", "mack", "macs", "matt", "maks"}}
+_WORDS = {}
+
+
+def english_word(w):
+    """Is `w` an ordinary (lowercase) English word, from the system word list (/usr/share/dict/words, if there is
+    one)? Those only count as the AI's name when they are a known mishearing: "March", "knock", "hugs" sound like
+    "Max", "Nova", "Higgs"; "Noah", "Matt" and "Hix" aren't words and may."""
+    if "set" not in _WORDS:
+        try:
+            with open(os.environ.get("MEET_WORDS", "/usr/share/dict/words")) as f:
+                _WORDS["set"] = {x.strip() for x in f if x.strip().isalpha() and x.strip().islower()}
+        except OSError:
+            _WORDS["set"] = set()
+    return w in _WORDS["set"]
+# "Noah said he'd be late": a name going straight on into one of these is talked about, not called
+NAME_AFTER_WEAK = set("said says is was has had will would thinks told and or are were".split())
+
+
+REQUEST_START = set("""just please can could would will do does did is are what what's how when where who why which tell
+give show set put walk run book add help remind check make let go take send get find sum summarize explain list read
+keep update switch handle remember note say""".split())
+
+
+def sound(w):
+    """A rough sound key: h dropped, voiced/unvoiced pairs merged, doubled letters and vowel runs collapsed, so Higgs,
+    hex, Hix, Hicks, Ex, X and Eggs all come out "aks", Nova "nafa", Noah "na"."""
+    w = re.sub(r"[^a-z]", "", w.lower())
+    if w == "x":
+        w = "ex"
+    for a, b in (("^kn", "n"), ("ph", "f"), ("ck", "k"), ("gh", "g"), ("sh", "s"), ("ch", "k"), ("th", "t"), ("qu", "kw"),
+                 ("wh", "w"), ("x", "ks"), (r"c(?=[eiy])", "s"), ("c", "k")):
+        w = re.sub(a, b, w)
+    w = w.replace("h", "").translate(str.maketrans("gzbdvqj", "ksptfkk"))
+    w = re.sub(r"(.)\1+", r"\1", w)
+    return re.sub(r"[aeiouy]+", "a", w)
+
+
+def sound_sim(a, b):
+    """1 - weighted edit distance between sound keys / the longer one. Dropping or adding a vowel or a soft consonant
+    (f, w, l, r) costs half ("Noah" for "Nova": 0.75)."""
+    a, b = sound(a), sound(b)
+    if not a or not b:
+        return 0.0
+    soft = set("afwlr")
+    c = lambda x: 0.5 if x in soft else 1.0  # noqa: E731
+    d = [[0.0] * (len(b) + 1) for _ in range(len(a) + 1)]
+    for i in range(1, len(a) + 1):
+        d[i][0] = d[i - 1][0] + c(a[i - 1])
+    for j in range(1, len(b) + 1):
+        d[0][j] = d[0][j - 1] + c(b[j - 1])
+    for i in range(1, len(a) + 1):
+        for j in range(1, len(b) + 1):
+            d[i][j] = min(d[i - 1][j] + c(a[i - 1]), d[i][j - 1] + c(b[j - 1]),
+                          d[i - 1][j - 1] + (0.0 if a[i - 1] == b[j - 1] else 1.0))
+    return max(0.0, 1.0 - d[-1][-1] / max(len(a), len(b)))
+
+
+def name_like(w, ai, people=(), strong=True):
+    """Could the word `w` be the AI's name misheard? A known mishearing; otherwise a word that sounds like it (closer
+    in a weak spot), isn't a common word, and isn't (more) like someone in the call ("Eva" when the AI is "Ava")."""
+    lw = w.lower().strip("'")
+    if lw == ai.lower() or any(lw == p.lower() for p in people):
+        return False
+    if lw in NAME_ALIASES.get(ai.lower(), ()):
+        return True
+    if lw in NOT_NAME or len(lw) < 3 or english_word(lw):  # "us", "it", "knock": only a known mishearing ("Ex")
+        return False
+    r = sound_sim(lw, ai)
+    return r >= (0.6 if strong else 0.8) and not any(sound_sim(lw, p) >= r for p in people)
+
+
+def fact_terms(facts):
+    """Names and codes in the fact sheet that STT may mishear: capitalized words of 4+ letters that aren't ordinary
+    words ("Okafor", "Lisbon"; not "She", nor days and months, which is what people get wrong), and codes with digits
+    ("PAY-512")."""
+    words, codes = {}, set()  # words: name -> how the facts write it, with its title ("Okafor" -> "Mrs. Okafor")
+    for f in facts:
+        codes |= set(re.findall(r"\b[A-Z]{2,}-?\d+\b", f))
+        for m in re.finditer(r"\b(?:(Mr|Mrs|Ms|Dr)\.?\s+)?([A-Z][a-z][A-Za-z'’]{2,})\b", f):
+            w = m.group(2)
+            if m.start() > 0 and not english_word(w.lower()) and w.lower() not in NOT_NAME:  # not the fact's first word
+                words[w] = f"{m.group(1)}. {w}" if m.group(1) else words.get(w, w)
+    return words, codes
+
+
+def fix_terms(text, terms, people=(), ai=""):
+    """A name or code from the fact sheet that STT misheard ("Mr. O'Keffe" for Mrs. Okafor, "K512" for PAY-512) is put
+    back as the facts spell it, so the fact-check and the writer don't 'correct' the person for it (they did, twice,
+    on 2026-10-23). A capitalized word that sounds like a fact name (sound_sim >= 0.8; not an English word, a person in
+    the call or the AI), or a code with the same digits."""
+    words, codes = terms
+    skip = {p.lower() for p in people} | {ai.lower()}
+
+    def word(m):
+        title, w = m.group(1), m.group(2)
+        lw = w.lower().replace("’", "'")
+        if lw in skip or english_word(lw) or lw in NOT_NAME:
+            return m.group(0)
+        best = next((t for t in words if lw == t.lower()), None) or max(words, key=lambda t: sound_sim(lw, t), default=None)
+        if best is None or (lw != best.lower() and sound_sim(lw, best) < 0.8):
+            return m.group(0)
+        full = words[best]  # with the facts' title, if a title was said ("Mr. O'Keffe" -> "Mrs. Okafor")
+        return full if title and full != best else f"{title}. {best}" if title else best
+
+    def code(m):
+        c = m.group(0)
+        digits = re.sub(r"\D", "", c)
+        return next((k for k in codes if re.sub(r"\D", "", k) == digits and k.upper() != c.upper()), c)
+    if words:
+        text = re.sub(r"\b(?:(Mr|Mrs|Ms|Dr)\.?\s+)?([A-Z][A-Za-z'’]{2,})\b", word, text)
+    if codes:
+        text = re.sub(r"\b[A-Za-z]{1,4}-?\d{2,}\b", code, text)
+    return text
+
+
+def overlaps(a, b, share=0.6):
+    """Do two transcripts say mostly the same words: `share` of the shorter one's words (3 or more) in the other?"""
+    wa, wb = re.findall(r"[a-z0-9']+", a.lower()), re.findall(r"[a-z0-9']+", b.lower())
+    short, other = (wa, set(wb)) if len(wa) <= len(wb) else (wb, set(wa))
+    return len(short) >= 3 and sum(w in other for w in short) >= share * len(short)
+
+
+BLEED_S, BLEED_DB = 2.5, 6.0  # a line mostly the same as another person's from this long ago, this much quieter: bleed
+
+
+def trivial(text):
+    """Only listener sounds and fillers, however many ("Oh. Oh. Okay. Yes.", "Yeah, yeah, um."), not asked."""
+    words = re.findall(r"[a-z][a-z'-]*", text.lower())
+    return bool(words) and len(words) <= 6 and not text.rstrip().endswith("?") and all(
+        w in BACKCHANNEL or w in FILLERS for w in words)
+
+
+def calling_spots(text):
+    """Where in `text` people call someone by name: (start, end, word, spot, led) per word. spot "strong": the first
+    word of a sentence after any greetings ("hey", "okay", "morning") with a comma or the sentence's end after it, or
+    a word set off by commas / after the last comma; "weak": the first word of a sentence going straight on ("Noah walk
+    us through it", not "Noah said he'd be late" or "Hicks Street"), or a capitalized last word ("What do you think
+    Noah?"). led: a greeting or a comma comes before it (its capital is the speaker's, not the sentence's)."""
+    for m in re.finditer(r"[^.?!]+[.?!]*", text):
+        sent = m.group(0)
+        toks = list(re.finditer(r"[A-Za-z][A-Za-z']*", sent))
+        lead = True
+        for i, t in enumerate(toks):
+            w = t.group(0)
+            after = sent[t.end():t.end() + 1]
+            before = sent[toks[i - 1].end():t.start()] if i else ""
+            last = i == len(toks) - 1
+            nxt = toks[i + 1].group(0).lower() if not last else ""
+            ends = after in (",", ".", "?", "!", "") or last
+            first = lead and w.lower() not in NAME_LEAD
+            if first or w.lower() not in NAME_LEAD:
+                lead = False
+            led = i > 0 and (first or "," in before)
+            if (first and ends) or ("," in before and ends):
+                spot = "strong"
+            elif (first and not ends and nxt not in NAME_AFTER_WEAK and not w.lower().endswith("'s")
+                  and not (not last and toks[i + 1].group(0)[0].isupper() and nxt != "i")) or (last and i > 0 and w[0].isupper()):
+                spot = "weak"
+            else:
+                continue
+            yield m.start() + t.start(), m.start() + t.end(), w, spot, led
 
 
 def fix_name(text, ai, people=()):
-    """Higgs STT sometimes mishears the AI's name when it's said to get attention ("Pigs, how should we...",
-    "thanks, Hicks.", "Pigs. And what should..."): a word that sounds like it (similar spelling, about as long), as
-    the first word (after hey/hi/okay/so) set off by punctuation, or the last one after a comma, becomes the name."""
+    """Higgs STT often mishears the AI's name when someone calls it ("Pigs, how should we...", "Hello, hex.", "Hey, hey
+    Noah, how are you?", "As long as we ask first, Hicks, what do you think?": 16 lines in the 2026-10-23 calls, none
+    repaired by the old rule). A word that sounds like the name (`name_like`; closer in a weak spot) becomes the name
+    where people call someone (`calling_spots`)."""
+    spans = []
+    for a, b, w, spot, _ in calling_spots(text):
+        nxt = re.match(r" ([A-Za-z']+)", text[b:])
+        # the name said straight into a request ("Assistant just set up his snack", MSI-Bench) reads as a vocative
+        # only with its comma: without it the judge took it as said to the group, 3 votes of 3 ("Max capacity is" no)
+        comma = spot == "weak" and nxt is not None and nxt.group(1).lower() in REQUEST_START
+        if w.lower() == ai.lower() and comma:
+            spans.append((a, b, ai + ","))
+        elif w.lower() != ai.lower() and name_like(w, ai, people, strong=spot == "strong"):
+            spans.append((a, b, ai + ("," if comma else "")))
+    for a, b, new in reversed(spans):
+        text = text[:a] + new + text[b:]
+    return text
+
+
+def NAME_RE(ai):  # noqa: N802
+    return re.compile(rf"\b{re.escape(ai)}\b", re.I)
+
+
+def maybe_named(text, ai, people=()):
+    """Is someone called by a name that isn't anyone here ("Hi, Hank.", "What do you think, Kate?", "Thoma, are we
+    go?": Higgs STT swapping in another name), or by a word a bit like the AI's? Then the local second opinion
+    (name_from_local) is worth waiting for. Rare enough (2026-10-23 calls: see tests/name_stt.py) not to slow lines."""
+    names = {p.lower() for p in people} | {ai.lower()}
+    for _, _, w, spot, led in calling_spots(text):
+        lw = w.lower()
+        if lw in names or lw in NOT_NAME or lw in NAME_LEAD or len(lw) < 2:
+            continue
+        if lw in NAME_ALIASES.get(ai.lower(), ()) or (not english_word(lw) and sound_sim(lw, ai) >= 0.5):
+            return True
+        if spot == "strong" and (w[0].isupper() if led else not english_word(lw)):
+            return True
+    return False
+
+
+# In a group call a line whose Higgs transcript has no AI name but calls someone who isn't here (maybe_named, ~4% of
+# lines) is transcribed again locally with the AI's name as a hotword, one at a time, and waits up to NAME_WAIT s for it
+# (name_from_local). Whisper encodes a 30 s window whatever the line's length: ~0.6 s idle, 1.4 s on a loaded machine.
+NAME_CHECK = os.environ.get("MEET_NAME_CHECK", "1") == "1"
+NAME_WAIT = float(os.environ.get("MEET_NAME_WAIT", "1.0"))
+NAME_BUSY = {"n": 0}  # name checks in flight (whisper jobs), process-wide: at most one
+
+
+def name_from_local(text, local, ai, people=()):
+    """A second opinion on the AI's name: `local` is the same line transcribed by faster-whisper with the name as a
+    hotword. If it has the name where people call someone (fix_name's spots, checked on `local` itself) and `text`
+    doesn't, the word of `text` aligned with it becomes the name ("Okay, hey, do you know anything about Alex?" +
+    "Okay, Higgs, do you know anything about Alex?"), or the name is put there if Higgs STT dropped it."""
     from difflib import SequenceMatcher
-
-    def sim(a, b):
-        return SequenceMatcher(None, a.lower(), b.lower()).ratio()
-
-    def like(w):  # sounds like the AI's name, and not (more) like a person in the call ("Eva" when the AI is "Ava")
-        r = sim(w, ai)
-        return (w.lower() != ai.lower() and abs(len(w) - len(ai)) <= 2 and r >= 0.6
-                and not any(sim(w, p) >= r for p in people))
-
-    m = re.match(r"^((?:hey|hi|hello|okay|ok|so|and|um|uh)[,]?\s+)?([A-Za-z']+)(?=[,.!?])", text, re.I)
-    if m and like(m.group(2)):
-        text = text[:m.start(2)] + ai + text[m.end(2):]
-    m = re.search(r",\s*([A-Za-z']+)([.?!]*)\s*$", text)
-    if m and like(m.group(1)):
-        text = text[:m.start(1)] + ai + text[m.end(1):]
-    w = re.findall(r"[A-Za-z']+", text)
-    if 2 <= len(w) <= 3 and like(w[0]) and text.lstrip().startswith(w[0]):  # "Pigs stop."
-        text = text.replace(w[0], ai, 1)
+    if not local or re.search(rf"\b{re.escape(ai)}\b", text, re.I) or not re.search(rf"\b{re.escape(ai)}\b", local, re.I):
+        return text
+    # where whisper has it must itself be a calling spot: a stand-in word there would have been repaired
+    probe = re.sub(rf"\b{re.escape(ai)}\b", "Hicks", local, count=1, flags=re.I)  # a known mishearing of "Higgs"
+    if fix_name(probe, "Higgs") == probe:
+        return text
+    tw = list(re.finditer(r"[A-Za-z0-9][A-Za-z0-9']*", text))
+    lw = [w.lower() for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9']*", local)]
+    j = next((i for i, w in enumerate(lw) if re.fullmatch(rf"{re.escape(ai.lower())}(?:'s|')?", w)), None)
+    if j is None:
+        return text
+    for tag, i1, i2, j1, j2 in SequenceMatcher(None, [w.group(0).lower() for w in tw], lw, autojunk=False).get_opcodes():
+        if not j1 <= j < j2:
+            continue
+        if tag == "replace" and i2 - i1 <= 2:  # the stand-in, or a name heard as two words ("Hig's")
+            k = min(i1 + (j - j1), i2 - 1)
+            return text[:tw[k].start()] + ai + text[tw[k].end():]
+        if tag == "insert":  # Higgs STT dropped it: put it in, set off as when called
+            at = tw[i1].start() if i1 < len(tw) else len(text.rstrip(".?! "))
+            if i1 == 0:
+                return f"{ai}, {text[:1].lower()}{text[1:]}" if text[:2] != "I " else f"{ai}, {text}"
+            return text[:at] + f"{ai}, " + text[at:] if i1 < len(tw) else text[:at] + f", {ai}" + text[at:]
+        return text
     return text
 
 
@@ -385,6 +635,15 @@ VOLUNTEERS = re.compile(r"\bI(?:'ll| will| can| could)\s+(?:handle|take care of|
                         r"implement|set up|write the|own the)\b", re.I)
 STOP_ASK = re.compile(r"^(?:(?:ok(?:ay)?|hey|um|uh)[,.]?\s+)?(?:stop(?: talking)?|wait|hold on|hang on|shh+|quiet|be quiet|"
                       r"enough|one (?:sec|second|moment))[.!]*$", re.I)
+# The writer ending the conversation ("I'm sorry, Priya. I can't continue this conversation." after "are you dumb?"):
+# asked again with STAY; a refusal never goes into the history, which the writer would follow from then on.
+REFUSAL = re.compile(r"\b(?:I|we)(?:\s+am|\s+are|['’]m|['’]re)?\s+(?:can['’]?t|cannot|can not|won['’]t|unable to|not able to)\s+"
+                     r"(?:continue|keep)\s+(?:this|the|our)\s+(?:conversation|discussion|chat)|"
+                     r"\bI\s+(?:can['’]?t|cannot|won['’]t)\s+(?:engage|respond to (?:that|this))\b", re.I)
+CLARIFY = re.compile(r"\b(?:not sure what you mean|(?:could|can) you (?:please )?(?:clarify|repeat|rephrase)|"
+                     r"didn't (?:quite )?catch (?:that|it)|what do you mean)\b", re.I)
+STAY = ("[Stay friendly and keep helping. If the remark was rude or strange, answer it lightly in a few words and carry "
+        "on; never refuse to talk.]\n")
 WRITER = REPLY_SYS2
 FACT_GUARD = os.environ.get("MEET_FACT_GUARD", "0") == "1"
 # Off: a group question sharing words with the fact sheet counted as answerable gained 2 held-out lines but cost group
@@ -404,8 +663,9 @@ async def hedged(task, again, delay):
     """task's result, or that of again() started after `delay` s if it finishes first (Higgs latency has a long tail:
     2.6-3.3 s drafts in the scenario runs, against ~0.5 s usually). An empty result waits for the other one."""
     done, _ = await asyncio.wait({task}, timeout=delay)
-    if done:
+    if done and task.exception() is None and task.result():
         return task.result()
+    # slow, or it came back empty or failed (then at once: a question went unanswered as "no draft" 0.6 s after it)
     other = asyncio.ensure_future(again())
     pending = {task, other}
     while pending:
@@ -427,6 +687,17 @@ VOICE_RT = os.environ.get("MEET_SPEECH", os.environ.get("MEET_AVATAR_VOICE", "re
 READER = ("You are a text-to-speech engine. Read the user's text aloud exactly as written, word for word, in a natural "
           "conversational voice. Say nothing else: no greeting, no comment, no question.")
 SPLIT_MIN_S = 5.5  # render the first >= 5.5 s of a long reply first (Read My Lips: the second part's face is ready in time)
+# The Realtime voice starts reading a speculated reply as soon as its draft is complete and passes the checks, not
+# once the judge has decided (it decided ~0.4 s after the draft was done, then reading took ~0.5 s more).
+EARLY_READ = os.environ.get("MEET_EARLY_READ", "1") == "1"
+# One hop (MEET_ONEHOP): a speculated reply is answered in audio by the writer's own session instead of drafted and then
+# read (first audio ~0.4 s sooner); its first sentence passes the same checks before it may play, else the text draft
+# is read after all. HOP_WAIT: how long after the decision a one-hop answer may take to have its first sentence.
+ONEHOP = os.environ.get("MEET_ONEHOP", "1") == "1"
+HOP_WAIT = 1.2
+# With the live face, the turn-taking models get Higgs's voice delayed by the face's lag, as people hear it (MEET_LIVE_ALIGN)
+LIVE_ALIGN = os.environ.get("MEET_LIVE_ALIGN", "0") == "1"
+HOP_WORDS = 10  # ... or its first 10 words, if the first sentence is longer
 RT_FIRST_S = 2.0   # no Realtime speech this long after asking (~0.6 s normally; a voice session still opening under
 #                    load took 12 s): TTS 3 voices the reply instead
 
@@ -447,24 +718,29 @@ def cut_point(pcm, start, min_s=SPLIT_MIN_S):
         if e[i] < thr and e[i + 1] < thr and e[i + 2] < thr:
             return start + int(min_s * SR) + (i + 1) * win
     return None
-FILLERS = {"clips": None, "loading": False}
+THINKING = {"clips": None, "loading": False}
 
 
 def load_fillers():
     """Build/load the Avatar thinking clips in a background thread, once."""
-    if FILLERS["clips"] is not None or FILLERS["loading"]:
+    if THINKING["clips"] is not None or THINKING["loading"]:
         return
-    FILLERS["loading"] = True
+    THINKING["loading"] = True
 
     def work():
         try:
-            FILLERS["clips"] = avatar.filler_assets(VOICE)
+            THINKING["clips"] = avatar.filler_assets(VOICE)
         except Exception as e:  # noqa: BLE001  (no fillers: the reply just waits for its face)
             print(f"avatar fillers: {e!r}", flush=True)
-            FILLERS["clips"] = []
+            THINKING["clips"] = []
         finally:
-            FILLERS["loading"] = False
+            THINKING["loading"] = False
     threading.Thread(target=work, daemon=True).start()
+
+
+def live_face(room):
+    """The room's live avatar (live_avatar.LiveAvatar) while it is up, else None."""
+    return getattr(room, "live", None)
 
 
 ECHO_DB = float(os.environ.get("MEET_ECHO_DB", "25"))  # quieter than Higgs's output by this much while it talks: echo
@@ -502,6 +778,17 @@ def vocative_person(text, people, ai):
     return None
 
 
+def person_called_before(ctx, speaker, people, ai, text):
+    """The person this speaker called by name alone just before ("Alex." [pause] "Your mic is a bit noisy.": STT split
+    the line and the second piece was answered as if said to the AI), unless this piece names the AI."""
+    if not ctx or ctx[-1]["speaker"] != speaker or re.search(rf"\b{re.escape(ai)}\b", text, re.I):
+        return None
+    prev = ctx[-1]["text"]
+    if len(re.findall(r"[A-Za-z']+", prev)) > 3:
+        return None
+    return vocative_person(prev, people, ai)
+
+
 def vocative_only(text, ai):
     """"Hey, Higgs." / "Higgs?" / "Hi Higgs!": the AI's name with at most a greeting word. Also a short preface that
     ends on a tag question ("Assistant, you caught all that, right?"): the request usually follows a pause (MSI-Bench:
@@ -514,7 +801,7 @@ def vocative_only(text, ai):
             and re.search(r"\b(right|yeah|okay|ok|yes|got that|caught (all )?(of )?that|follow(ing)?)\s*\?\s*$", text.lower()) is not None)
 
 
-def echoes(reply, line, run=6):
+def echoes(reply, line, run=8):
     """True if the reply repeats `run`+ consecutive words of the line it answers (it's speaking as that person)."""
     w = lambda x: re.findall(r"[a-z0-9']+", x.lower())  # noqa: E731
     a, b = w(reply), " ".join(w(line))
@@ -589,6 +876,27 @@ class Pool:
         self.opens = 0
         for _ in range(size):
             self._refill()
+        self.keeper = asyncio.ensure_future(self._keep())
+
+    async def _keep(self):
+        """Replace idle sessions before they age out (MAX_AGE) or after Higgs closed them: a request that found only
+        old ones opened a new session first (0.3-0.6 s, more for a voice), so the first reply after a quiet few
+        minutes was slow."""
+        while not self.closed:
+            await asyncio.sleep(30)
+            replaced = False
+            for _ in range(self.q.qsize()):
+                try:
+                    s = self.q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                old = time.perf_counter() - s.opened_at >= self.MAX_AGE - 70
+                if s.close_code is None and (not old or replaced):
+                    self.q.put_nowait(s)
+                else:  # one per pass: opened together they age together, and voice sessions opening at once draw
+                    replaced = True  # 429s from the voice check (a mode switch then waited 32 s for its session)
+                    asyncio.ensure_future(close(s))
+                    self._refill()
 
     def _new(self):
         self.opens += 1
@@ -638,12 +946,19 @@ class Pool:
         try:
             ids = list(dict.fromkeys(e["item"]["id"] for t, e in s.events if t >= since and e.get("type") ==
                                      "conversation.item.added" and (e.get("item") or {}).get("id")))
+            if not ids and s.close_code is None and time.perf_counter() - s.opened_at < self.MAX_AGE:
+                await self._put(s)  # taken but not used (the request was cancelled first)
+                return
             for i in ids:
                 await s.send({"type": "conversation.item.delete", "item_id": i})
             for i in ids:
                 await s.wait(lambda e, i=i: e.get("type") == "conversation.item.deleted" and e.get("item_id") == i,
                              timeout=3, since=since)
             if ids and s.close_code is None and time.perf_counter() - s.opened_at < self.MAX_AGE:
+                # nothing before the next request is read again: drop it (a voice session kept every event and all
+                # its speech for minutes; each wait() scans the list, and the room's tick shares the loop)
+                s.events = [x for x in s.events if x[0] >= s.now() - 0.5]
+                s.audio.clear()
                 await self._put(s)
                 return
         except Exception:  # noqa: BLE001
@@ -684,38 +999,66 @@ class Pool:
                         self._refill()
         return ""
 
-    async def speak(self, text, on_audio, cancelled):
-        """An audio session reads `text` aloud; on_audio(bytes) gets the speech as it arrives. True once complete."""
+    async def speak(self, text, on_audio, cancelled, on_text=None, marks=None, instructions=None):
+        """An audio session reads `text` aloud (or, given a writer's `instructions`, answers it: ONEHOP); on_audio(bytes)
+        gets the speech as it arrives, on_text(str) the transcript so far. True once complete. The session takes
+        `instructions` (else the pool's) with a session.update first if it has others (~20 ms; no new voice check),
+        so one pool of voice sessions serves reading and answering: more voice sessions per room drew 429s from
+        the voice check when they opened, and a one-hop answer then waited 1.5 s+ for a session."""
         if not spend():
             return False
         s, ok = None, False
+        marks = {} if marks is None else marks  # when each step happened (perf_counter), for the logs
+        marks["asked"] = time.perf_counter()
         try:
             s = await self._take()
+            marks["session"] = time.perf_counter()
             since = s.now()
             if cancelled():
                 ok = True  # unused: back to the pool
                 return False
+            want = instructions or self.instructions
+            if getattr(s, "instr", self.instructions) != want:
+                await s.send({"type": "session.update", "session": {"instructions": want}})
+                await s.wait(lambda e: e.get("type") == "session.updated", timeout=5, since=since)
+                s.instr = want
+                since = s.now()
             await s.say_text(text)
             _, ev = await s.wait("response.created", timeout=10, since=since)
+            marks["created"] = time.perf_counter()
             rid = ev["response"]["id"]
             done = asyncio.ensure_future(s.wait(lambda e: e.get("type") == "response.done"
                                                 and (e.get("response") or {}).get("id") == rid, timeout=30, since=since))
-            n = 0
+            n, said = 0, ""
             while True:
                 buf = s.audio.get(rid, b"")
                 if len(buf) > n:
                     on_audio(bytes(buf[n:n + (len(buf) - n) // 2 * 2]))
                     n += (len(buf) - n) // 2 * 2
+                if on_text is not None:  # the transcript so far (all of it: deltas that came with response.created too)
+                    now_said = s.transcript(rid)
+                    if now_said != said:
+                        said = now_said
+                        on_text(said)
                 if done.done():
+                    if on_text is not None:
+                        full = s.transcript(rid)
+                        if full and full != said:
+                            on_text(full)
                     _, ev = done.result()
                     buf = s.audio.get(rid, b"")
                     if len(buf) > n:
                         on_audio(bytes(buf[n:len(buf) // 2 * 2]))
                     ok = ev["response"].get("status") in (None, "completed")
                     return ok and len(buf) > 0
-                if cancelled():
-                    done.cancel()
+                if cancelled():  # the session goes back to the pool once the response has ended (closing it cost the
+                    # next reply a session open, 0.3-0.6 s: early reads of lines the judge then passed over drained it)
                     await s.send({"type": "response.cancel", "response_id": rid})
+                    try:
+                        await asyncio.wait_for(done, 3.0)
+                        ok = True
+                    except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                        done.cancel()
                     return False
                 await asyncio.sleep(0.03)
         except Exception:  # noqa: BLE001
@@ -730,26 +1073,35 @@ class Pool:
 
     async def close(self):
         self.closed = True
+        self.keeper.cancel()
         while not self.q.empty():
             await close(self.q.get_nowait())
 
 
 class RealtimeSpeaker:
     """SentenceSpeaker's interface (feed / close / cancel / segments), voiced by a Realtime session reading the whole
-    reply once its text is complete (Pool.speak); falls back to TTS 3 if that fails."""
+    reply once its text is complete (Pool.speak); falls back to TTS 3 if that fails. start() reads it before close()
+    (the draft is complete but the judge hasn't decided yet: Reply.start_early)."""
 
     def __init__(self, pool, audio, on_done):
         self.pool, self.audio, self.on_done = pool, audio, on_done
         self.text, self.cancelled, self.closed, self.fallback, self.finished = "", False, False, None, False
+        self.started = False
 
     def feed(self, delta):
-        self.text += delta
+        if not self.started:
+            self.text += delta
+
+    def start(self):
+        if not (self.started or self.cancelled):
+            self.started = True
+            asyncio.ensure_future(self._run())
 
     def close(self):
         if self.closed:
             return
         self.closed = True
-        asyncio.ensure_future(self._run())
+        self.start()
 
     def cancel(self):
         self.cancelled = self.closed = True
@@ -758,11 +1110,13 @@ class RealtimeSpeaker:
 
     async def _run(self):
         text = self.text.strip()
-        late = {"v": False}
+        late, marks = {"v": False}, {}
         task = asyncio.ensure_future(self.pool.speak(
-            text, lambda b: None if late["v"] else self.audio.extend(b), lambda: self.cancelled or late["v"]))
+            text, lambda b: None if late["v"] else self.audio.extend(b), lambda: self.cancelled or late["v"], marks=marks))
         t0 = time.perf_counter()
         while not task.done() and not self.audio and time.perf_counter() - t0 < RT_FIRST_S:
+            if "session" not in marks and time.perf_counter() - t0 > 0.3:
+                break  # no voice session free (still opening: the voice check throttles them): TTS 3 now, not in 2 s
             await asyncio.sleep(0.03)
         if not task.done() and not self.audio:  # too slow to start: don't keep the room waiting
             late["v"] = True
@@ -798,6 +1152,42 @@ class RealtimeSpeaker:
             out.append((at, end, x))
             at = end
         return out
+
+
+class HopSpeaker(RealtimeSpeaker):
+    """ONEHOP: the writer's own session answers the conversation in audio (same instructions, the preset voice), so a
+    reply needs no second request to be read aloud (first audio ~0.49 s after asking instead of ~0.90 s,
+    tests/onehop_bench.py). Its transcript (`text`) streams in with the speech; on_line checks its first sentence
+    before letting it play, and falls back to write-then-read if that fails. A failure after the start ends the reply
+    where its speech stops."""
+
+    def __init__(self, pool, instructions, convo, audio, on_done):
+        super().__init__(pool, audio, on_done)
+        self.failed, self.instructions = False, instructions
+        self.started = self.closed = True
+        self.task = asyncio.ensure_future(self._hop(convo))
+
+    def feed(self, delta):
+        pass
+
+    def start(self):
+        pass
+
+    def close(self):
+        pass
+
+    async def _hop(self, convo):
+        self.marks = {}
+        ok = await self.pool.speak(convo, self.audio.extend, lambda: self.cancelled, on_text=self._text, marks=self.marks,
+                                   instructions=self.instructions)
+        if self.cancelled:
+            return
+        self.failed = not ok
+        self.finished = ok
+        self.on_done()
+
+    def _text(self, t):
+        self.text = t
 
 
 class DefaultBrain:
@@ -921,6 +1311,7 @@ class Listener:
         self.line_audio = []     # this line's frames as sent to STT, for the local fallback
         self.since_check, self.checking = 0.0, False  # BARGE: speech since this line was last fact-checked so far
         self.cut = None          # BARGE: the history entry of this line's fragment that Higgs cut in on
+        self.line_db = None      # the median level (dB) of the line being handed to on_line
 
     def _new_session(self):
         tr = {"model": "higgs-stt-3.1", **({"language": LANG} if LANG else {})}
@@ -1040,14 +1431,18 @@ class Listener:
                 self.b.on_resume(self)
 
     async def _transcribe(self, t_end, audio=(), cut=None):
-        self.decided_early = False
+        tok = {"decided": False}  # this piece's own count (pieces of one person overlap: "Nova, what...?" + "Oh.")
         try:
-            await self._transcribe_and_decide(t_end, audio, cut)
+            await self._transcribe_and_decide(t_end, audio, cut, tok)
+        except Exception:  # noqa: BLE001  (a line lost to a bug says so in the room log)
+            import traceback
+            self.b.a.room.log({"type": "agent_error", "where": "line", "slot": self.slot,
+                               "error": traceback.format_exc()[-1500:]})
         finally:
-            if not self.decided_early:
+            if not tok["decided"]:
                 self.in_flight = max(0, self.in_flight - 1)
 
-    async def _transcribe_and_decide(self, t_end, audio=(), cut=None):
+    async def _transcribe_and_decide(self, t_end, audio=(), cut=None, tok=None):
         if not spend():
             return
         s = self.session
@@ -1056,6 +1451,7 @@ class Listener:
         failed, local, t0 = None, None, time.perf_counter()
         if fallback and time.monotonic() - LOCAL_STT.last_fail < 60:  # Higgs STT is failing: don't wait for it first
             local = asyncio.ensure_future(asyncio.to_thread(LOCAL_STT.transcribe, np.concatenate(audio)))
+        ai, people = self.b.a.ai, self.b.a.names()
         try:
             await s.send({"type": "input_audio_buffer.commit"})
             _, ev = await s.wait("input_audio_buffer.committed", timeout=STT_WAIT if fallback else 10, since=since)
@@ -1075,6 +1471,8 @@ class Listener:
             LOCAL_STT.last_fail = time.monotonic()
             t1 = time.perf_counter()
             text = await (local or asyncio.to_thread(LOCAL_STT.transcribe, np.concatenate(audio)))
+            if WHISPER_JUNK.match(text):  # what Whisper says for noise ("you" was judged and nearly answered)
+                text = ""
             room = self.b.a.room
             room.log({"type": "stt_fallback", "slot": self.slot, "name": self.name, "higgs": failed[:120], "text": text,
                       "early": local is not None, "local_s": round(time.perf_counter() - t1, 2),
@@ -1083,17 +1481,41 @@ class Listener:
                 self.b.a.told_stt = True
                 await room.event({"type": "ai_note", "text": "Higgs transcription is failing right now; "
                                                              "lines are transcribed locally (Whisper) until it's back."})
+        # a group call, and someone is called by a name that isn't anyone here: whisper, listening for the AI's name,
+        # gets a say (name_from_local). Only then, and one at a time: started for every line, these whisper jobs
+        # queued up behind each other on MSI-Bench's long lines, and an STT fallback waited 90 s behind them.
+        if (NAME_CHECK and fallback and text and failed is None and len(self.b.listeners) > 1 and LOCAL_STT.model is not None
+                and not NAME_BUSY["n"] and NAME_RE(ai).search(fix_name(text, ai, people)) is None
+                and maybe_named(text, ai, people)):
+            NAME_BUSY["n"] += 1
+            named = asyncio.ensure_future(asyncio.to_thread(LOCAL_STT.transcribe, np.concatenate(audio), ai))
+            named.add_done_callback(lambda f: NAME_BUSY.update(n=NAME_BUSY["n"] - 1) or f.exception())
+            try:
+                heard = await asyncio.wait_for(asyncio.shield(named), NAME_WAIT)
+            except Exception:  # noqa: BLE001  (too slow, or whisper failed: Higgs's transcript as it is)
+                heard = ""
+            try:
+                fixed = name_from_local(text, heard, ai, people)
+            except Exception:  # noqa: BLE001
+                fixed = text
+            if fixed != text:
+                self.b.a.room.log({"type": "name_fix", "slot": self.slot, "higgs": text, "local": heard, "text": fixed,
+                                   "wait_s": round(time.perf_counter() - t0, 2)})
+                text = fixed
         self.t_transcript = time.perf_counter()
+        lv = [frame_db(f) for f in audio]
+        lv = sorted(x for x in lv if x > -55)
+        self.line_db = lv[len(lv) // 2] if len(lv) >= 10 else None  # how loud this line was on their mic (bleed check)
         if text:
             merge, self.merge = self.merge, False
-            await self.b.on_line(self, text, t_end, merge, cut)
+            await self.b.on_line(self, text, t_end, merge, cut, tok)
 
 
 class Reply:
     """A reply being voiced (a Realtime session reading it whole, or TTS 3 sentence by sentence). Given `text` it is
     complete at once; given None, its text streams in through feed() until close()."""
 
-    def __init__(self, line_id, listener, line_text, text, t_end, one=False, ai=None, reader=None):
+    def __init__(self, line_id, listener, line_text, text, t_end, one=False, ai=None, reader=None, hop=None):
         self.line_id, self.listener, self.line_text, self.t_end = line_id, listener, line_text, t_end
         self.text, self.closed = "", False
         self.one = one           # only the first sentence (Avatar on: its render waits for the whole speech)
@@ -1109,19 +1531,24 @@ class Reply:
         self.filler = None       # [pcm, pos] of a thinking clip playing while this reply's face renders
         self.filler_done = False
         self.correction = False
+        self.held = None         # the Listener who went on after its line: wait for what they add (on_resume)
         self.barge = False       # a correction cut in while its line was still being said (BARGE)
         self.cancel = False
         self.started = False     # first audio frame sent
         self.marks = {"created": time.perf_counter()}  # when each stage finished (perf_counter), for timing logs
-        self.rt = reader is not None  # voiced by a Realtime session, not TTS 3
+        self.rt = reader is not None or hop is not None  # voiced by a Realtime session, not TTS 3
+        self.hop = hop is not None  # (voice pool, writer instructions, convo): answered in audio (HopSpeaker, ONEHOP)
+        self.said = False        # ai_say sent (a one-hop reply's: once its transcript is complete)
+        self.caption = False     # an ai_say with its first sentence went out (the complete one updates it)
         done = lambda: setattr(self, "done", True)  # noqa: E731
-        self.speaker = RealtimeSpeaker(reader, self.audio, done) if self.rt else SentenceSpeaker(VOICE, self.audio, done)
+        self.speaker = (HopSpeaker(hop[0], hop[1], hop[2], self.audio, done) if self.hop
+                        else RealtimeSpeaker(reader, self.audio, done) if self.rt else SentenceSpeaker(VOICE, self.audio, done))
         if text is not None:
             self.feed(text)
             self.close()
 
     def feed(self, delta):
-        if self.closed:
+        if self.closed or self.hop:
             return
         if self.label is not None:  # hold the first characters back until we know they aren't "Higgs:"
             self.head += delta
@@ -1139,7 +1566,21 @@ class Reply:
         self.text += delta
         self.speaker.feed(delta)
 
+    def start_early(self):
+        """Its draft is complete: a Realtime voice starts reading it now, while the judge still decides (~0.5 s of
+        reading latency off the reply; a "no" cancels it). Text and checks are unchanged: close() still follows."""
+        if not self.rt or self.closed:
+            return
+        if self.head:  # a reply shorter than the label check
+            h, self.head, self.label = self.head, "", None
+            self.feed(h)
+        self.marks["read"] = time.perf_counter()
+        self.speaker.start()
+
     def close(self):
+        if self.hop:  # its text is its transcript, still coming in (tick keeps the history's copy up to date)
+            self.closed = True
+            return
         if self.head and not self.closed:  # a reply shorter than the label check
             h, self.head, self.label = self.head, "", None
             self.feed(h)
@@ -1165,14 +1606,18 @@ class ImprovedBrain:
         self.line_no = 0          # id of the newest committed line
         self.pending = None       # Reply waiting for the floor
         self.playing = None       # Reply being heard
+        self.paused = None        # {r, li, t, pos}: a reply just stopped by li, resumed if li only said "mm-hm" (RESUME)
+        self.corrected = []       # corrections said in this meeting (each one is made once)
         self.last_out = np.zeros(N, np.int16)
         self.gain = 1.0
         self.last_listener = None
-        self.recent = deque(maxlen=12)  # (time, slot, text): echo guard
+        self.recent = deque(maxlen=12)  # {t, slot, text, db, entry, line} of recent lines: the bleed guard (on_line)
         self.lab_t = 0.0
         self.voice_at = 0.0       # perf_counter when anyone last made a sound
         self.line_by = {}         # line id -> slot of who said it
-        self.out_db = deque([-90.0], maxlen=30)  # Higgs's output level over the last 0.6 s (echo gate)
+        # Higgs's output level over the last 0.6 s (echo gate); 2.6 s kept, as a live face is heard ~1.3 s late
+        self.out_db = deque([-90.0], maxlen=130)
+        self.out_frames = deque(maxlen=130)  # its last 2.6 s of output frames (LIVE_ALIGN)
         self.reader = None        # Pool of Realtime voice sessions for replies (opened on first use)
 
     def voice(self):
@@ -1180,7 +1625,7 @@ class ImprovedBrain:
         if not VOICE_RT:
             return None
         if self.reader is None or self.reader.closed:
-            self.reader = Pool(READER, 1, cfg={"output_modalities": ["audio"], "audio": {"output": {"voice": VOICE}}})
+            self.reader = Pool(READER, 2, cfg={"output_modalities": ["audio"], "audio": {"output": {"voice": VOICE}}})
         return self.reader
 
     def point(self):
@@ -1200,6 +1645,7 @@ class ImprovedBrain:
                       "write0": Pool(WRITER.format(ai=p["target_speaker"], setting=p["setting"],
                                                    people=", ".join(p["people"]) or "the group",
                                                    facts="nothing specific beyond general knowledge."), 1)}
+
         if old:
             for pool in old.values():
                 await pool.close()
@@ -1238,9 +1684,11 @@ class ImprovedBrain:
         await self._rebuild_pools()
 
     def on_resume(self, li):
-        """The same person went on right after a commit: a reply to their half-line is stale."""
-        if self.pending and self.pending.listener is li:
-            self._cancel_pending()
+        """The same person went on right after a commit: a reply to their half-line waits to hear what they add. A
+        "Yeah." or "Oh." keeps it (on_line); anything more replaces it (in the 2026-10-23 calls a trailing "Oh." or
+        "Okay." restarted 20 replies, up to 8.8 s late)."""
+        if self.pending and self.pending.listener is li and not (BARGE and self.pending.correction):
+            self.pending.held = li
 
     def moved_on(self, r):
         """Has the conversation moved past r's line? Any newer line does, except that a question put to the AI by name
@@ -1252,8 +1700,10 @@ class ImprovedBrain:
             return True
         return any(self.line_by.get(i) == r.listener.slot for i in range(r.line_id + 1, self.line_no + 1))
 
-    def _cancel_pending(self):
+    def _cancel_pending(self, why=None):
         if self.pending:
+            if why:  # a decided reply that won't be said is logged (one went missing silently in a 2026-10-23 call)
+                self.a.room.log({"type": "reply_dropped", "line": self.pending.line_text[:80], "why": why})
             self.pending.cancel = True  # also stops its Avatar render (one at a time per API key)
             self.pending.speaker.cancel()
             self.pending = None
@@ -1274,7 +1724,7 @@ class ImprovedBrain:
         a = self.a
         try:
             t0 = time.perf_counter()
-            text = (await asyncio.to_thread(LOCAL_STT.transcribe, pcm)).strip()
+            text = fix_terms((await asyncio.to_thread(LOCAL_STT.transcribe, pcm)).strip(), fact_terms(a.facts), a.names(), a.ai)
             # a line so far that can't contradict a fact yet: too short, or nothing like a fact (FACTY, the fact sheet)
             if (len(re.findall(r"[A-Za-z0-9']+", text)) < BARGE_WORDS or li.line_audio is not line
                     or not (FACTY.search(text) or facts_relevant(text, [], a.facts, [a.ai] + a.names()))):
@@ -1315,11 +1765,16 @@ class ImprovedBrain:
         ans = re.sub(rf"^\s*{re.escape(a.ai)}\s*:\s*", "", ans.strip().strip('"'), flags=re.I)
         mine = [h["text"] for h in a.history if h["speaker"] == a.ai][-3:]
         skip = ("no draft (Higgs request failed)" if not ans else "repeat" if repeats(ans, mine)
+                else "corrected already" if repeats(ans, self.corrected, 0.6)
                 else "echo" if echoes(ans, text) else "a correction is waiting" if self.correcting() else None)
-        if skip:
+        if skip:  # nothing was said over them: the whole line is judged when it ends (it was "corrected mid-line")
+            if li.cut is frag:
+                li.cut = None
+            if frag in a.history:
+                a.history.remove(frag)
             await a.room.event({"type": "reply_skipped", "line": text[:80], "why": f"cut in: {skip}"})
             return
-        self._cancel_pending()
+        self._cancel_pending("a correction cuts in")
         r = self.pending = Reply(self.line_no, li, text, ans, time.perf_counter(), reader=self.voice())
         r.correction = r.barge = r.addressed = True
         if a.avatar:
@@ -1327,17 +1782,80 @@ class ImprovedBrain:
             r.render = asyncio.ensure_future(self._render(r))
         await a.status("thinking")
 
-    async def on_line(self, li, text, t_end, merge, cut=None):
+    async def on_line(self, li, text, t_end, merge, cut=None, tok=None):
         a = self.a
         if not re.search(r"[A-Za-z]", text):
             return  # "...", or a hum transcribed in another script ("嗯。")
-        if any(time.time() - t0 < 2.0 and slot != li.slot and repeats(text, [x]) for t0, slot, x in self.recent):
-            return  # someone's mic picked up another participant (no headphones): ignore the echo
-        self.recent.append((time.time(), li.slot, text))
+        db = li.line_db
+        li.line_db = None
+        # Two people in one room (no headphones): one's mic hears the other's line too, quieter, and STT may write it a
+        # bit differently ("Hi everyone!" / "Hi everyone! Hi Higgs, can you hear us?", 2026-10-23). Whichever copy is
+        # transcribed first, the louder one is who said it.
+        now = time.time()
+        for rec in self.recent:
+            if rec["slot"] == li.slot or now - rec["t"] >= BLEED_S or abs(t_end - rec["t_end"]) > 0.8:
+                continue  # copies of one utterance end together (an answer 2 s later isn't bleed)
+            same = now - rec["t"] < 2.0 and repeats(text, [rec["text"]])
+            if not (same or overlaps(text, rec["text"])):
+                continue
+            louder = db is not None and rec["db"] is not None and db > rec["db"] + BLEED_DB
+            quieter = db is not None and rec["db"] is not None and db < rec["db"] - BLEED_DB
+            if louder:
+                a.room.log({"type": "bleed", "slot": rec["slot"], "text": rec["text"][:80], "why": "louder here",
+                            "to": li.name, "db": [round(rec["db"], 1), round(db, 1)]})
+                old = rec["slot"]
+                if len(text) > len(rec["text"]):  # the louder mic heard more of it ("Hi everyone! Hi Higgs, can...")
+                    rec["text"] = text
+                    if rec["entry"] is not None and rec["entry"].get("speaker") != a.ai:
+                        rec["entry"]["text"] = text
+                self._reattribute(rec, li)
+                if rec["shown"]:  # already on the transcript panel under the other person: move it
+                    owed = any(r is not None and r.line_id == rec["line"] for r in (self.pending, self.playing))
+                    await a.line(li.slot, li.name, rec["text"], {"speak": owed, "why": "louder on this mic"},
+                                 moved_from=old)
+                return
+            if quieter or (same and not louder):
+                a.room.log({"type": "bleed", "slot": li.slot, "text": text[:80], "why": "quieter" if quieter else "same words",
+                            "db": None if db is None else round(db, 1)})
+                return
+        rec = {"t": now, "t_end": t_end, "slot": li.slot, "text": text, "db": db, "entry": None, "line": None,
+               "owner": None, "shown": False}
+        self.recent.append(rec)
         merged = merge and bool(a.history) and a.history[-1]["speaker"] == li.name
+        if merged and cut is None:
+            tail, tail_kind = prefilter(text, a.ai, [], a.names())
+            if tail_kind == "stop":  # "Higgs, what's X?" + "Wait.": they want quiet, not the answer
+                self._cancel_pending("asked to stop")
+                if self.playing is not None:
+                    await self._interrupt(self.playing, li)
+                self._drop_paused()
+            if tail_kind in ("skip", "backchannel", "filler", "stop") or trivial(tail):
+                li.gate.settle()
+                # "Nova, what can you help with?" + "Oh." / "Okay. Yes.": the same line; its verdict and reply stand
+                prev = a.history[-1]
+                prev["text"] = join_pieces(prev["text"], tail) if tail_kind != "skip" else prev["text"]
+                if self.pending is not None and self.pending.held is li:
+                    self.pending.held = None
+                if (self.paused is not None and self.paused["li"] is li and self.playing is None and self.pending is None
+                        and time.perf_counter() - self.paused["t"] < PAUSE_S):
+                    await self._resume(li, tail)  # the "mm-hm" that stopped a reply, joined to their last piece
+                owed = self.pending is not None and self.pending.listener is li
+                await a.line(li.slot, li.name, prev["text"], {"speak": owed, "why": f"went on: {tail_kind or 'backchannel'}",
+                                                              "decided_s": 0.0}, True)
+                return
+            if self.pending is not None and self.pending.held is li:
+                self._cancel_pending("they went on")  # they added something: the whole line is judged again
         if merged:  # they went on after a pause: one line (the transcript panel replaces the fragment)
             text = join_pieces(a.history.pop()["text"], text)
         text, kind = prefilter(text, a.ai, a.history, a.names())
+        text = fix_terms(text, fact_terms(a.facts), a.names(), a.ai)  # "Mr. O'Keffe" for Mrs. Okafor (fact sheet)
+        if self.paused is not None and kind != "skip":
+            small = kind in ("backchannel", "filler") or trivial(text)
+            if (small and self.paused["li"] is li and self.playing is None and self.pending is None
+                    and time.perf_counter() - self.paused["t"] < PAUSE_S):
+                await self._resume(li, text)
+            elif not small:
+                self._drop_paused()  # a real interruption: they said something
         if kind == "skip":
             return
         cut_i = next((i for i, h in enumerate(a.history) if h is cut), None) if cut is not None else None
@@ -1346,15 +1864,21 @@ class ImprovedBrain:
             context, cur, merged = a.history[:cut_i] + a.history[cut_i + 1:], cut, True
         else:
             context = list(a.history)
-            cur = {"speaker": li.name, "text": text}
+            cur = rec["entry"] = {"speaker": li.name, "text": text}
             a.history.append(cur)
         if kind:  # "mm-hm", "um", "so the, uh,": part of the meeting, but nothing to answer, and it doesn't make a reply
+            rec["shown"] = True
             if kind != "unfinished":  # someone else is waiting for stale; an unfinished line merges with what follows
                 li.gate.settle()
+            if kind == "stop":  # "Higgs, stop!" is too short to count as an interruption while it's said: stop now
+                self._cancel_pending("asked to stop")
+                if self.playing is not None:
+                    await self._interrupt(self.playing, li)
+                self._drop_paused()
             await a.line(li.slot, li.name, text, {"speak": False, "why": kind, "decided_s": 0.0}, merged)
             return
         self.line_no += 1
-        line_id = self.line_no
+        line_id = rec["line"] = self.line_no
         self.line_by[line_id] = li.slot
         self.last_listener = li
         r = {**self.point(), "meeting": a.room.id, "line": line_id, "context_turns": context, "current_turn": cur}
@@ -1369,22 +1893,52 @@ class ImprovedBrain:
         one = a.avatar and reader is None  # TTS 3 + face: one sentence (its render waits for the whole speech)
         if one:  # the face renders only once the whole reply is spoken, and TTS takes about as long as the speech
             convo = "[Answer in one short sentence of at most 12 words.]\n" + convo
+        if vocative_only(text, a.ai) and not re.search(r"\?\s*$", text):  # "Higgs." / "Hey, Higgs." and a pause
+            # the request usually follows: "Yes?", not "Hello, Alex. How can I assist you today?" to be talked over
+            convo = "[They only said your name: answer with a short acknowledgement like \"Yes?\", at most 4 words.]\n" + convo
         # Likely a reply (a one-to-one call, the AI's name, a question): voice the draft while it streams in and the
         # judge decides (~0.5 s sooner). Otherwise draft only; a silent line costs no speech.
         spec = None
+        with_facts = facts_relevant(text, context[-2:], a.facts, [a.ai] + a.names())
         if SPECULATE and (len(self.listeners) == 1 or a.ai.lower() in text.lower() or text.rstrip().endswith("?")):
-            spec = Reply(line_id, li, text, None, t_end, one=one, ai=a.ai, reader=reader)
-        writer = pools["write"] if facts_relevant(text, context[-2:], a.facts, [a.ai] + a.names()) else pools["write0"]
-        draft = asyncio.ensure_future(writer.ask(convo, retries=1, on_delta=spec.feed if spec else None))
+            if reader is not None and not one and ONEHOP:  # the writer's instructions, answered in the voice (ONEHOP)
+                spec = Reply(line_id, li, text, None, t_end, ai=a.ai,
+                             hop=(reader, pools["write" if with_facts else "write0"].instructions, convo))
+            else:
+                spec = Reply(line_id, li, text, None, t_end, one=one, ai=a.ai, reader=reader)
+        writer = pools["write"] if with_facts else pools["write0"]
+        # the text draft also runs beside a one-hop answer: it takes over if that one isn't fit to say
+        draft = asyncio.ensure_future(writer.ask(convo, retries=1, on_delta=spec.feed if spec and not spec.hop else None))
+        if spec and spec.rt and EARLY_READ and not spec.hop:
+            def read_now(f, spec=spec):  # the checks below that would replace this draft, done now on its text
+                ans = "" if f.cancelled() or f.exception() else re.sub(
+                    rf"^\s*{re.escape(a.ai)}\s*:\s*", "", f.result().strip().strip('"'), flags=re.I)
+                mine = [] if REPEAT_ASK.search(text) else [h["text"] for h in a.history if h["speaker"] == a.ai][-3:]
+                said = re.sub(rf"^\s*{re.escape(a.ai)}\s*:\s*", "", (spec.text + spec.head).strip().strip('"'), flags=re.I)
+                if (ans and said == ans and not echoes(ans, text) and not VOLUNTEERS.search(ans) and not REFUSAL.search(ans)
+                        and not repeats(ans, mine)):
+                    spec.start_early()
+            draft.add_done_callback(read_now)
         # both drafts start with the decision, so a correction costs no extra wait (rewriting it after: ~1 s)
         cdraft = asyncio.ensure_future(pools["write"].ask(CORRECT.format(ai=a.ai) + convo, retries=1)) if a.facts else None
         speak, d = await decide(r, lambda kind, _sys, user, _i: pools[kind].ask(user), samples=self.samples, prompt=PROMPT)
         why = d["reading"]
         if cut_i is not None and why.get("wrong"):
             speak, d["why"] = False, "corrected mid-line"  # Higgs already cut in on it
+        words = [w for w in re.findall(r"[a-z']+", text.lower()) if w != a.ai.lower()]
+        if not speak and a.ai.lower() in text.lower() and all(w in ("hey", "hi", "hello", "yo") for w in words):
+            # "Hey, Higgs." / "Higgs?": called, so it answers ("Yes?"); one judge vote in a one-to-one call said
+            # "nothing asked" now and then (greet_1to1)
+            speak, d["why"] = True, "called by name"
         t_decided = time.perf_counter()
-        li.in_flight = max(0, li.in_flight - 1)  # decided: a reply waiting on this line may go (or drop)
-        li.decided_early = True
+        if tok is not None and not tok["decided"]:  # decided: a reply waiting on this line may go (or drop)
+            tok["decided"] = True
+            li.in_flight = max(0, li.in_flight - 1)
+        if rec["owner"] is not None and rec["owner"] is not li:  # a louder copy came while it was judged: theirs
+            li = rec["owner"]
+            if spec:
+                spec.listener = li
+        rec["shown"] = True
         await a.line(li.slot, li.name, text, {"speak": speak, "why": d["why"], "reading": why, "votes": d["votes"],
                                               "checks": d["checks"],
                                               "decided_s": round(time.perf_counter() - t_end, 2)}, merged)
@@ -1407,7 +1961,16 @@ class ImprovedBrain:
             cdraft.add_done_callback(lambda f: f.exception())
         if convo_used is not convo:
             writer = pools["write"]
-        ans = (await hedged(draft, lambda: writer.ask(convo_used, retries=0), HEDGE_S)).strip().strip('"')
+        empty_why = None  # why `ans` ended up empty, if not a failed request
+        hop_text = await self._hop_first(spec) if spec is not None and spec.hop else None
+        if spec is not None and spec.hop and hop_text is None:  # too slow, failed, or nothing said: write, then read
+            spec.speaker.cancel()
+            spec = None
+        if hop_text is not None:
+            ans = hop_text
+            draft.add_done_callback(lambda f: f.exception())
+        else:
+            ans = (await hedged(draft, lambda: writer.ask(convo_used, retries=0), HEDGE_S)).strip().strip('"')
         t_draft = time.perf_counter()
         if echoes(ans, text):  # the writer continued the speaker's own words ("Marcus, I'm not asking for the moon")
             if spec:
@@ -1417,7 +1980,7 @@ class ImprovedBrain:
                                     f"continue {li.name}'s words.]\n" + convo_used, retries=1)).strip().strip('"')
             ans = re.sub(rf"^\s*{re.escape(a.ai)}\s*:\s*", "", ans, flags=re.I)
             if echoes(ans, text):
-                ans = ""  # still not a reply: better silent than speaking as one of the people
+                ans, empty_why = "", "echoed the speaker"  # still not a reply: better silent than speaking as them
             t_draft = time.perf_counter()
         if VOLUNTEERS.search(ans):  # "I can handle the backend": it's an AI in a call, it can't
             if spec:
@@ -1426,10 +1989,20 @@ class ImprovedBrain:
             ans = (await writer.ask("[You are an AI in this call and can't do work outside it (coding, building, "
                                     "booking): don't volunteer for tasks.]\n" + convo_used, retries=1)).strip().strip('"') or ans
             t_draft = time.perf_counter()
+        if REFUSAL.search(ans):  # "I can't continue this conversation.": said once, it was repeated to every request after
+            if spec:
+                spec.speaker.cancel()
+                spec = None
+            ans = (await writer.ask(STAY + convo_used, retries=1)).strip().strip('"')
+            if REFUSAL.search(ans):
+                ans = ""
+                await a.room.event({"type": "reply_skipped", "line": text[:80], "why": "refusal"})
+                return
+            t_draft = time.perf_counter()
         ans = re.sub(rf"^\s*{re.escape(a.ai)}\s*:\s*", "", ans, flags=re.I)  # "Higgs: Judging is ..."
         if one:  # one sentence with the face on: the render waits for the whole reply's speech
             ans = first_sentence(ans).strip().strip('"')
-        if spec and (not ans or spec.text.strip().strip('"') != ans):  # the stream failed and a retry answered
+        if spec and (not ans or (hop_text if spec.hop else spec.text.strip().strip('"')) != ans):  # a retry answered
             spec.speaker.cancel()
             spec = None
         mine = [h["text"] for h in a.history if h["speaker"] == a.ai][-3:]
@@ -1442,8 +2015,20 @@ class ImprovedBrain:
             ans = (await writer.ask("[You already said that. Reply to the latest utterance with something new, "
                                             "briefly.]\n" + convo, retries=1)).strip().strip('"')
             t_draft = time.perf_counter()
+        if (ans and CLARIFY.search(ans) and mine and CLARIFY.search(mine[-1])
+                and not re.search(rf"\b{re.escape(a.ai)}\b", text, re.I)):
+            # it already asked what they meant: a second "Could you clarify?" to a garbled line is nagging (15 of them
+            # in the 2026-10-23 one-to-one calls)
+            if spec:
+                spec.speaker.cancel()
+            await a.room.event({"type": "reply_skipped", "line": text[:80], "why": "asked to clarify already"})
+            return
         correcting = BARGE and why.get("wrong")  # a correction is said even if people have moved on
-        skip = ("no draft (Higgs request failed)" if not ans else "repeat" if repeats(ans, mine)
+        # a question put to the AI (by name, one-to-one) gets its answer even if it's the same as before ("I said,
+        # Higgs, what do you think?"): 14 of 32 repeat skips in the 2026-10-23 calls were direct questions
+        skip = ((empty_why or "no draft (Higgs request failed)") if not ans else "repeat" if repeats(ans, mine) and not addressed
+                # the same correction again in this meeting (the soak: 5 times in 20 min) is nagging, unless asked
+                else "corrected already" if why.get("wrong") and not addressed and repeats(ans, self.corrected, 0.6)
                 else "someone spoke since" if not correcting and line_id != self.line_no and not (addressed and not any(
                     self.line_by.get(i) == li.slot for i in range(line_id + 1, self.line_no + 1)))
                 else "a correction is waiting" if not correcting and self.pending is not None and self.pending.correction
@@ -1453,14 +2038,22 @@ class ImprovedBrain:
                 spec.speaker.cancel()
             await a.room.event({"type": "reply_skipped", "line": text[:80], "why": skip})
             return
-        self._cancel_pending()
+        if rec["owner"] is not None and rec["owner"] is not li:  # a louder copy came while it was written
+            li = rec["owner"]
+            if spec:
+                spec.listener = li
+        self._cancel_pending("a newer reply")
         if spec:
             spec.close()
+            if spec.hop:
+                spec.text = ans  # its first sentence so far; tick follows the rest of the transcript
             self.pending = spec
         else:
             self.pending = Reply(line_id, li, text, ans, t_end, reader=reader)
         self.pending.vocative = vocative_only(text, a.ai)
         self.pending.addressed = addressed
+        if (li.speaking or li.in_flight) and not (BARGE and self.pending.correction):
+            self.pending.held = li  # they already went on: wait for what they add (on_resume)
         self.pending.correction = bool(why.get("wrong"))
         if a.avatar:  # render ahead, into a buffer: by the time the floor opens the face is (nearly) ready
             self.pending.video = False
@@ -1472,10 +2065,17 @@ class ImprovedBrain:
 
     async def tick(self, frames):
         t = self.t = self.t + TICK
-        total = np.zeros(N, np.int32) + self.last_out
+        live = live_face(self.a.room)
+        self.out_frames.append(self.last_out)
+        heard = self.last_out
+        if live and LIVE_ALIGN:  # the turn-taking models hear Higgs when people do: the face says it ~lag s later
+            k = int(round(live.lag / TICK))
+            heard = self.out_frames[-1 - k] if len(self.out_frames) > k else np.zeros(N, np.int16)
+        total = np.zeros(N, np.int32) + heard
         # Higgs's voice can come back through a person's speakers 0.1-0.5 s later: compare with its recent loudest frame
         self.out_db.append(frame_db(self.last_out))
-        echo_db = max(self.out_db) if max(self.out_db) > -60 else None
+        loud = max(self.out_db) if live else max(itertools.islice(self.out_db, max(0, len(self.out_db) - 30), None))
+        echo_db = loud if loud > -60 else None
         for f in frames.values():
             total += f
         for slot, li in list(self.listeners.items()):
@@ -1488,11 +2088,21 @@ class ImprovedBrain:
         if anyone:
             self.voice_at = time.perf_counter()
 
+        if (r := self.pending) is not None and r.closed and not r.audio and time.perf_counter() - r.t_end > STALE_MAX:
+            self._cancel_pending("no speech")  # its voice never came (Realtime and TTS 3 both failed)
+            await self.a.status("listening", dropped="no speech")
+        p = self.paused
+        if p is not None and time.perf_counter() - p["t"] > PAUSE_S and not p["li"].in_flight and not p["li"].speaking:
+            self._drop_paused()
         r = self.pending
         if r is not None and "audio" not in r.marks and len(r.audio) >= N * 2:
             r.marks["audio"] = time.perf_counter()
         # start with 200 ms of speech in hand (or the whole reply): TTS sometimes streams slower than it plays
-        if self.playing is None and r is not None and r.closed and (len(r.audio) >= N * 2 * 10
+        if r is not None and r.held is not None and (
+                (not (r.held.speaking or r.held.in_flight) and time.perf_counter() - r.held.last_voice > HELD_S)
+                or time.perf_counter() - r.t_end > STALE_MAX or r.held not in self.listeners.values()):
+            r.held = None  # they went on, but nothing came of it (a cough, too short to be a line)
+        if self.playing is None and r is not None and r.closed and r.held is None and (len(r.audio) >= N * 2 * 10
                                                                       or (r.done and len(r.audio) >= N * 2)):
             li = r.listener
             act, why = self.take.may_play(t, {"p_now": li.p_now, "silence": li.gate.silence}, anyone, r.line_text,
@@ -1517,6 +2127,8 @@ class ImprovedBrain:
                 act, why = ("drop", "stale") if age > STALE_MAX else ("play", "cut in" if r.barge else "correction")
             if act == "play":
                 self.pending, self.playing = None, r
+                if r.correction:
+                    self.corrected.append(r.text)
                 r.hist_idx = len(self.a.history)
                 self.a.history.append({"speaker": self.a.ai, "text": r.text})
                 li.gate.settle()  # the reply is out: a later word from them is a new line, not a resume
@@ -1573,13 +2185,28 @@ class ImprovedBrain:
                 r.started = True
                 m, now = r.marks, time.perf_counter()
                 t0 = m.get("speech_end", r.t_end)
-                timing = {k: round(m[k] - t0, 2) for k in ("commit", "transcript", "decided", "draft", "created", "audio",
+                timing = {k: round(m[k] - t0, 2) for k in ("commit", "transcript", "decided", "draft", "created", "read", "first", "audio",
                                                             "render", "filler", "video") if k in m}
                 timing["play"] = round(now - t0, 2)
                 timing["speculated"] = bool(m.get("speculated"))
                 timing["gate"] = m.get("gate")
+                if live_face(self.a.room):  # the live face plays it this much later (live_avatar.py)
+                    timing["live_lag"] = round(live_face(self.a.room).lag, 2)
                 await self.a.status("speaking", after_s=round(now - r.t_end, 2), why=r.play_why, timing=timing)
+                if not r.hop:
+                    r.said = True
                 await self.a.room.event({"type": "ai_say", "text": r.text})
+                r.caption = r.hop  # a one-hop reply's line is completed with an update when its transcript is
+            if r.hop:  # its words are still being transcribed: the history and the captions follow
+                said = r.speaker.text.strip()  # (not `t`: that's this tick's clock)
+                if said and said != r.text:
+                    r.text = said
+                    if r.hist_idx is not None and r.hist_idx < len(self.a.history) and \
+                            self.a.history[r.hist_idx]["speaker"] == self.a.ai:
+                        self.a.history[r.hist_idx]["text"] = said
+                if not r.said and (r.speaker.finished or r.speaker.failed or r.done):
+                    r.said = True
+                    await self.a.room.event({"type": "ai_say", "text": r.text, "update": True})
             gains = []
             hold = BARGE and r.correction  # talked over: keep going at full volume (HOLD_POLICY)
             for li in self.listeners.values():
@@ -1600,6 +2227,8 @@ class ImprovedBrain:
                 out = np.zeros(N, np.int16)
                 out[:len(a) // 2] = np.frombuffer(a, np.int16)
                 r.pos += len(a) // 2
+            elif r.done and live_face(self.a.room) and live_face(self.a.room).playing():
+                pass  # all sent, but the live face is still saying the end (~1.3 s behind): it can be interrupted
             elif r.done:
                 self.playing = None
                 r.cancel = True  # the words are over: video still rendering (a part's padding) isn't sent
@@ -1613,10 +2242,21 @@ class ImprovedBrain:
 
     async def _interrupt(self, r, li):
         r.cancel = True
-        r.speaker.cancel()
+        live = live_face(self.a.room)
+        pos = max(0, r.pos - int(live.lag * SR)) if live else r.pos  # a live face is heard ~1.3 s after the push
+        heard = floor.truncate(r.text, [(a / SR, b / SR, x) for a, b, x in r.speaker.segments], pos / SR)
+        if RESUME and not r.correction and not r.vstarted:
+            # it may have been a "mm-hm" the models missed: if their line comes back as one, go on (on_line ->
+            # _resume); its speech keeps arriving meanwhile
+            self._drop_paused()
+            self.paused = {"r": r, "li": li, "t": time.perf_counter(), "pos": pos}
+        else:
+            r.speaker.cancel()
         if r.vstarted:
             await self.a.room.avatar_stop()
-        heard = floor.truncate(r.text, [(a / SR, b / SR, x) for a, b, x in r.speaker.segments], r.pos / SR)
+        if r.hop and not r.said:  # its transcript wasn't sent yet: what was heard of it
+            r.said = True
+            await self.a.room.event({"type": "ai_say", "text": heard, "update": r.caption})
         if r.hist_idx is not None and r.hist_idx < len(self.a.history):
             # marked, so the judge and the writer know it was cut off (unmarked, the writer resumed its old answer)
             self.a.history[r.hist_idx]["text"] = f"{heard} [interrupted]"
@@ -1625,6 +2265,83 @@ class ImprovedBrain:
         await self.a.room.ai_flush()
         await self.a.room.ai_gain(1.0)
         await self.a.status("listening", stopped=f"{li.name} interrupted", heard=heard)
+
+    async def _hop_first(self, r):
+        """A one-hop reply's text once its first sentence is out (or all of it), label-free; None if it fails, says
+        nothing, or hasn't started within HOP_WAIT s (then the text draft is read instead)."""
+        t0, sp = time.perf_counter(), r.speaker
+
+        def no(why):
+            m = {k: round(v - r.t_end, 2) for k, v in getattr(sp, "marks", {}).items()}  # s after the line's commit
+            self.a.room.log({"type": "hop_fallback", "why": why, "text": sp.text[:80], "audio_s": round(len(r.audio) / 2 / SR, 2),
+                             "marks": m,
+                             "waited_s": round(time.perf_counter() - t0, 2), "since_line_s": round(time.perf_counter() - r.t_end, 2)})
+            return None
+        while time.perf_counter() - t0 < HOP_WAIT:
+            marks = getattr(sp, "marks", None) or {}
+            if "session" not in marks and time.perf_counter() - marks.get("asked", t0) > 0.25:
+                return no("no session")  # the voice sessions are busy or still opening: don't wait for a new one
+            if sp.failed or sp.cancelled:
+                return no("failed" if sp.failed else "cancelled")
+            if re.match(rf"^\s*{re.escape(self.a.ai)}\s*:", sp.text, re.I):
+                return no("label")  # it said its own label aloud ("Higgs: ..."): the text draft can drop it, speech can't
+            t = sp.text.strip().strip('"')
+            head = first_sentence(t, complete_only=True)
+            n = len(re.findall(r"[A-Za-z0-9']+", t))
+            if head is None and (n >= HOP_WORDS or (n >= 4 and len(r.audio) >= 2 * SR)):
+                # a long first sentence: enough words to check (an echo is 6 in a row, a label the first); its
+                # transcript trails its speech (2.35 s of audio had come with 7 words), so a second of speech will do
+                head = t
+            if sp.finished or (head is not None and r.audio):
+                r.marks["first"] = time.perf_counter()
+                return (t if sp.finished else head) or no("empty")  # finished saying nothing transcribed
+            await asyncio.sleep(0.02)
+        t = sp.text.strip().strip('"')
+        if r.audio and len(re.findall(r"[A-Za-z0-9']+", t)) >= 3 and not sp.failed:
+            r.marks["first"] = time.perf_counter()
+            return t  # it is talking, its transcript is just behind: better than starting over with the draft
+        return no("slow")
+
+    def _reattribute(self, rec, li):
+        """A line taken as said by rec's person was li's, heard on rec's mic too (bleed): it's li's line from now on."""
+        if rec["entry"] is not None and rec["entry"].get("speaker") != self.a.ai:
+            rec["entry"]["speaker"] = li.name
+        if rec["line"] is not None:
+            self.line_by[rec["line"]] = li.slot
+        for r in (self.pending, self.playing):
+            if r is not None and r.line_id == rec["line"]:
+                r.listener = li
+        rec["slot"], rec["db"], rec["owner"] = li.slot, None, li
+
+    def _drop_paused(self):
+        if self.paused is not None:
+            self.paused["r"].speaker.cancel()
+            self.paused = None
+
+    async def _resume(self, li, text):
+        """li's interruption came back as a backchannel ("Yeah.", "Oh.", "Exactly."; 5 replies in the 2026-10-23 calls
+        were cut off by one): the reply goes on from the start of the sentence it was cut in, as a person would."""
+        p, self.paused = self.paused, None
+        r = p["r"]
+        segs = r.speaker.segments
+        seg = next(((a, b) for a, b, _ in segs if a <= p["pos"] < b), None)
+        if seg is not None and seg[1] - p["pos"] < int(0.4 * SR):  # all but said: from the next one
+            seg = next(((a, b) for a, b, _ in segs if a >= seg[1]), None)
+        at = seg[0] if seg is not None else p["pos"]
+        if at >= len(r.audio) // 2 and r.done:  # it had said everything already
+            r.speaker.cancel()
+            return False
+        r.cancel, r.pos = False, at
+        if r.hist_idx is not None and r.hist_idx < len(self.a.history):
+            self.a.history[r.hist_idx]["text"] = r.text
+        self.playing = r
+        for li2 in self.listeners.values():
+            li2.barge.reset()
+            li2.hold.reset()
+        await self.a.room.event({"type": "ai_resumed", "after": text[:40], "from_s": round(at / SR, 2),
+                                 "paused_s": round(time.perf_counter() - p["t"], 2)})
+        await self.a.status("speaking", resumed=True)
+        return True
 
     async def _render(self, r):
         """Render the reply through Higgs Avatar once its speech is complete. Chunks are held in r.vbuf until the
@@ -1682,7 +2399,7 @@ class ImprovedBrain:
         """The floor opened for this reply: send the video rendered so far; the rest follows as it comes. If none is
         ready yet (the Avatar's first frame takes ~1.5 s after the speech is done), a pre-rendered "Hmm." covers the
         wait: its clip plays now, and this reply's video stays buffered until the clip has been heard."""
-        clips = FILLERS["clips"] or []
+        clips = THINKING["clips"] or []
         if not r.vbuf and clips and r.filler is None and not r.filler_done:
             text, pcm, mp4 = clips[0] if r.correction else clips[int(time.time()) % len(clips)]
             r.filler = [pcm, 0]
@@ -1739,9 +2456,10 @@ class HiggsAgent:
         await self.room.event({"type": "ai_state", "mode": self.mode, "avatar": getattr(self.room, "avatar", False),
                                "status": s, "calls": CALLS["n"], **kw})
 
-    async def line(self, slot, name, text, decision, merge=False):
+    async def line(self, slot, name, text, decision, merge=False, moved_from=None):
         await self.room.event({"type": "line", "slot": slot, "name": name, "text": text, "decision": decision,
-                               "mode": self.mode, **({"merge": True} if merge else {})})
+                               "mode": self.mode, **({"merge": True} if merge else {}),
+                               **({"moved_from": moved_from} if moved_from is not None else {})})
 
     def _brain(self, mode):
         return ImprovedBrain(self) if mode == "improved" else DefaultBrain(self)
@@ -1816,6 +2534,7 @@ class HiggsAgent:
         if isinstance(self.brain, ImprovedBrain):
             li = next((x for x in self.brain.listeners.values() if x.name == name), None)
             if li:
+                li.line_db = None  # typed: no level
                 asyncio.ensure_future(self.brain.on_line(li, text, time.perf_counter(), False))
         elif isinstance(self.brain, DefaultBrain):
             asyncio.ensure_future(self.brain.engine.session.say_text(f"{name}: {text}"))
@@ -1838,9 +2557,11 @@ class HiggsAgent:
             self._launch()
 
     def set_avatar(self, on):
-        """Both modes: improved renders ahead (Realtime voice, a "Hmm." filler, long replies in two parts); default
-        holds each whole reply until its face renders (DefaultBrain)."""
-        self.avatar = bool(on)
+        """Rendered faces (no LiveKit, or the live face failed). Both modes: improved renders ahead (Realtime voice, a
+        "Hmm." filler, long replies in two parts); default holds each whole reply until its face renders (DefaultBrain).
+        A live face (room.live_state, live_avatar.py) needs none of that: replies play as with the face off, and the
+        room streams them to it. The room calls this again whenever its live face starts, ends or fails."""
+        self.avatar = bool(on) and getattr(self.room, "live_state", None) not in ("starting", "on")
         if self.avatar and AVATAR_FILLER:
             load_fillers()
         if self.avatar:
@@ -1880,8 +2601,10 @@ class HiggsAgent:
                     self.stats["tick_ms_max"] = max(self.stats["tick_ms_max"], round(dt * 1000, 1))
                 except Exception as e:  # noqa: BLE001  (keep the room alive; the log says what broke)
                     if time.perf_counter() - self.errors_t > 5.0:
+                        import traceback
                         self.errors_t = time.perf_counter()
                         await self.room.event({"type": "ai_error", "error": repr(e)[:300]})
+                        self.room.log({"type": "agent_error", "where": "tick", "error": traceback.format_exc()[-1500:]})
                     out = None
                 if out is not None:
                     await self.room.send_ai_audio(out.astype(np.int16).tobytes())

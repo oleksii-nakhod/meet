@@ -13,6 +13,7 @@ interruption). A switch on the call flips between the two so the difference can 
     pip install -r requirements.txt
     pip install --no-deps maai==0.2.25      # turn-taking models (MaAI); its GUI/audio-device deps are stubbed
     cp .env.example .env                    # and put your BOSON_API_KEY in it (or export BOSON_API_KEY)
+                                            # + LIVEKIT_URL/_API_KEY/_API_SECRET for the live face (optional, below)
     playwright install chromium             # tests that use a browser only
 
 CPU is enough: each person in an improved-mode room runs the turn-taking models in their own process (~0.7 core).
@@ -35,7 +36,8 @@ The models download from Hugging Face on first use. `ffmpeg` is needed only to r
 - `server.py`, `room.py`: the call: rooms, the WebSocket audio/video relay, the agent interface. `web/`: the browser
   UI (create page with meeting presets, call page, avatar assets).
 - `agent.py` (`HiggsAgent`): Higgs on slot 0, both brains. `floor.py`: when to take, keep and give up the floor.
-  `avatar.py`: Higgs Avatar rendering. `stub_agent.py`: used if `agent.py` can't be imported or `MEET_AGENT=stub`.
+  `avatar.py`: Higgs Avatar rendering. `live_avatar.py`: the live face (a realtime Boson avatar in a LiveKit room;
+  `web/vendor/` has the LiveKit browser SDK it plays with). `stub_agent.py`: used if `agent.py` can't be imported or `MEET_AGENT=stub`.
 - `mmhm/`: Mm-hm, the turn-taking layer from the team's earlier prototype: the Higgs Realtime/TTS client
   (`higgs.py`), the default-mode engine (`engine.py`), MaAI turn-taking and backchannel models (`models.py`),
   expressive speech (`expressive.py`).
@@ -53,13 +55,34 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
   - **Hearing:** each person has their own transcription session (`language: en` hint), so names are known. Sessions
     reconnect on their own: Higgs closes a Realtime session after 5 minutes without speech, and opens can fail
     under load. Higgs's own voice leaking back through someone's speakers (more than 25 dB below what it is playing)
-    is ignored, so it neither interrupts Higgs nor becomes a line.
+    is ignored, so it neither interrupts Higgs nor becomes a line. Two people in one room (2026-10-24): a line
+    mostly the same as another person's from the last 2.5 s is their speech on the other mic; the copy 6 dB louder
+    is who said it, whichever was transcribed first (the other is dropped, or the earlier one re-attributed: its
+    history entry, its reply, its place on the transcript panel; logged `bleed`; `scenarios.py same_room`). Names and
+    codes from the fact sheet that STT misheard are put back ("Mr. O'Keffe" → "Mrs. Okafor", "K512" → "PAY-512"),
+    so Higgs doesn't "correct" people for its own mishearing (`fix_terms`; days, months and numbers are left alone;
+    `tests/fact_cases.py` 8/9 → 9/9).
   - **Line end:** a line ends after 0.30 s of silence when the per-person turn-taking model (VAP) agrees the person
     is done; mid-thought pauses get held. If the person goes on, the pieces merge into one line (the transcript
     panel replaces the fragment).
-  - **Before judging** (`prefilter`): a misheard name is repaired ("Pigs, how should we…" → "Higgs, …"); backchannels
-    ("mm-hm", "yeah", "got it"), fillers ("um", "so the, uh,"), unfinished fragments and "stop / hold on" are logged
-    but not judged or answered, and don't make a reply someone else is waiting for stale.
+  - **The AI's name** (`fix_name`, 2026-10-24): Higgs STT often mishears it when someone calls the AI ("Hello, hex.",
+    "Hey, hey Noah, how are you?", "As long as we ask first, Hicks, what do you think?"; 16 lines in the
+    2026-10-23 calls, none answered). A word that *sounds* like the name (a rough sound key: Higgs = hex = Hix = Ex =
+    Eggs, Noah ≈ Nova), in a spot where people call someone (first word after greetings, between commas, after the
+    last comma, a capitalized last word, a sentence start going straight on but not "Noah said…"), becomes the name;
+    an ordinary English word (`/usr/share/dict/words`) only through a list of seen mishearings, and never a person in
+    the call. In a group call each line is also transcribed by local Whisper with the name as a hotword, and a line
+    whose Higgs transcript calls someone who isn't there ("Hi, Hank.", "What do you think, Kate?") waits up to 0.8 s
+    for it (`name_from_local`, logged `name_fix`; ~4 % of lines without the name). `tests/name_stt.py`: 756 calls of
+    Nova / Higgs / Max in 7 voices, clean and through a rough laptop mic, and 840 lines without the name ("No, I
+    don't think so.", "Noah said…", "hex code", "Max capacity…"): the name survives raw STT 88.4 %, the old rule
+    93.0 % (18 false names), now 96.2 % (0 false names; Higgs through the rough mic 57 % → 81 %). On the 1202 real
+    lines of 2026-10-23 it repairs 13 (the old rule 0).
+  - **Before judging** (`prefilter`): backchannels ("mm-hm", "yeah", "got it", up to 6 such words), fillers ("um",
+    "so the, uh,"), unfinished fragments and "stop / hold on" are logged but not judged or answered, and don't make a
+    reply someone else is waiting for stale. "Higgs, stop!" while it talks stops it (too short to count as an
+    interruption while it's said). A person called by name alone ("Alex." [pause] "your mic is noisy") owns the
+    next piece.
   - **Deciding:** judge v5 (`agent.DEC_SYS5`: Third Voice's v4b plus greetings, the AI's own name, follow-ups and an
     explicit one-to-one mode) on every line, 3 judge samples + 3 fact-checks. It decides as soon as 2 of 3 judges say
     speak; a failed Higgs request is an abstention, not a "no".
@@ -69,14 +92,41 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
     request after 0.5 s; an interrupted turn is marked `[interrupted]` in the history so the next reply answers the
     interruption.
   - **Speaking:** a Realtime session reads the finished draft aloud in the same preset voice, face on or off
-    (`MEET_SPEECH`, default `realtime`); TTS 3 takes over if Realtime hasn't started within 2 s. `MEET_SPEECH=tts`
+    (`MEET_SPEECH`, default `realtime`); TTS 3 takes over if Realtime hasn't started within 2 s. When the line looks
+    like it wants a reply (one-to-one, the AI's name, a question) it is answered in **one hop** (`MEET_ONEHOP`,
+    2026-10-24): the conversation goes straight to a voice session with the writer's instructions (a
+    `session.update` on the room's pool of 2 voice sessions, ~20 ms, no new voice check), so there's no second
+    request to read a text draft aloud (first audio ~0.49 s after asking instead of ~0.90 s, `tests/onehop_bench.py`).
+    Its transcript streams in with the speech; it may play once the judge says speak and its first sentence passes
+    the checks (not its own label, not the speaker's words, no refusal or volunteering), else the text draft written
+    alongside is read as before (`hop_fallback` in the room log, with why: no free voice session, slow, a check).
+    A/B, same code, both at once (12 scenes): 41/41 each, reply heard median 2.42 → 1.82 s, p90 4.09 → 3.67 s;
+    `tests/writer_cases.py --versions v2 hop`: the same facts, corrections and summaries. `MEET_ONEHOP=0`: write,
+    then read, with reading started as soon as the draft is complete and passes the checks, while the judge still
+    decides (`MEET_EARLY_READ`; vs the code before: first audio 1.92 → 1.51 s, p90 3.94 → 2.42 s). Pools replace
+    sessions about to age out in the background, so the first answer after a quiet stretch doesn't wait for a new
+    one; a reading with no free voice session within 0.3 s (they open slowly at the start of a call) is voiced by
+    TTS 3 at once instead of after 2 s (first answers in a fresh group call 3.7 → 1.6–2.0 s). `MEET_SPEECH=tts`
     goes back to TTS 3 sentence by sentence, which starts on the draft's first sentence: without the face, replies
     were heard ~0.2–0.3 s sooner that way (`./run.sh check`, 2026-10-23: ~1.3–1.4 s vs ~1.6–1.7 s after the line).
   - **Taking the floor:** a reply starts only when the room has been quiet for 0.35 s and nobody who just spoke
     still holds the floor. It is dropped if someone spoke after its line, or if it couldn't start within 3.5 s while
-    people kept talking (8 s in a quiet room). Every reply that was decided but not spoken logs `reply_skipped`.
+    people kept talking (8 s in a quiet room). If the asker goes on, the reply waits for what they add: a tail that is
+    only "Oh.", "Okay. Yes." or fillers keeps it, anything more is judged again with the line (a trailing "Oh."
+    restarted 20 replies on 2026-10-23, up to 8.8 s late). Every reply that was decided but not spoken logs
+    `reply_skipped` or `reply_dropped`; one whose voice never comes is dropped after 8 s.
+  - **What it won't say:** a question put to it (by name, one-to-one) is answered even if the answer repeats an
+    earlier one (14 of 32 repeat skips on 2026-10-23 were direct questions); a refusal ("I can't continue this
+    conversation.", after "are you dumb?") is re-asked and never enters the history (one locked Nova for the rest
+    of a call); a second "could you clarify?" in a row to a garbled line stays unsaid; a summary is given, not
+    promised, and invents no tasks; each correction is made once per meeting unless asked (the 20-minute soak
+    corrected the same "twenty seconds" 5 times). Called by name alone ("Hey, Higgs.", "Higgs?") it always
+    answers, briefly ("Yes?", so the request after the pause isn't talked over); when every judge request fails
+    (a Higgs hiccup) a line put to it is answered rather than dropped as "nothing asked".
   - **While Higgs talks:** a listener's "mm-hm" only ducks it. A real interruption stops it, and Higgs remembers
-    only what was heard (`floor.py`, ported from `mmhm/engine.py`; 16 unit tests).
+    only what was heard (`floor.py`, ported from `mmhm/engine.py`; 16 unit tests). When what stopped it comes back
+    transcribed as a backchannel ("Yeah, yeah, uh-huh, yeah.", "Exactly." — 5 replies were cut off that way on
+    2026-10-23), it goes on from the start of the sentence it was cut in (`MEET_RESUME`, `ai_resumed`, ~0.7 s pause).
   - **Barging in on a wrong fact** (`MEET_BARGE`, on by default): corrections don't wait for the floor. While someone
     talks, what they've said so far is transcribed locally (faster-whisper) every 0.8 s of speech (`MEET_BARGE_EVERY`)
     and fact-checked, with the correction drafted alongside; when every check says it contradicts the fact sheet,
@@ -97,7 +147,48 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
   (2026-10-23, `--set 3`, 12/12; 9–15 s answers ~5–6.6 s). Only someone taking the floor (0.8 s of speech) cancels a
   reply while its face renders; a "mm" doesn't. Default: each whole Realtime reply is held until its face renders
   (~2.9–3.7 s, no filler, no early part: the wait is what plain Higgs plus a face looks like), and speech stops it as
-  before. A pre-rendered idle loop plays between replies.
+  before. A pre-rendered idle loop plays between replies. With LiveKit configured the face is live instead (next).
+
+### Live face (LiveKit, `live_avatar.py`; 2026-10-23)
+
+The rendered face can only start once a reply's whole speech exists, so the reply waits for it. With `LIVEKIT_URL`,
+`LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` set (a [LiveKit Cloud](https://cloud.livekit.io) project; Boson refuses
+self-hosted LiveKit), turning the avatar on starts a **realtime Boson avatar session** instead, one per room, released
+when the avatar is turned off or the room empties (a session that ends is replaced; 3 failed starts fall back to the
+rendered face). Higgs then talks exactly as with the face off (no render wait, no "Hmm.", normal-length replies), and
+`room.py` streams every 20 ms frame it sends to slot 0 to the avatar over a LiveKit data stream (`DataStreamAudioOutput`,
+the protocol Boson's avatar speaks). The avatar publishes lip-synced video + that audio into a LiveKit room; each page
+joins it subscribe-only (a token in the `live_avatar` message) and plays both on the AI tile, instead of slot 0's
+socket audio. The call itself (people's audio and cameras) stays on Meet's own sockets.
+
+- **Faster replies:** with real Higgs (`tests/live_avatar_e2e.py`, one-to-one, 4 questions per mode) the face is
+  heard 2.55–3.1 s after the question in improved (2026-10-24 with one hop, median 2.77 s; it was 2.9–3.2 s, median
+  3.07 s, before: the reply is sent 1.32–1.39 s after the question, then the avatar's own 1.2–1.7 s; the rendered
+  face: 3.7–5.0 s, 5–6.6 s for long answers) and 2.4–3.0 s in default.
+  Session start: ~1.3–1.7 s after the switch. `tests/live_avatar_lag.py`: the avatar's lag is the same for a new
+  utterance, a burst pushed all at once, and a stream kept open with silence, so it can't be pushed away from here.
+- **While it catches up:** the AI tile glows from Higgs's decision until the face starts talking (with the face on,
+  the orb that pulsed while thinking is hidden), and captions wait 1.3 s to come with the face's words.
+- **The lag:** the avatar says a frame ~1.1–1.7 s after it is sent (median ~1.3 s; the same when audio is pushed
+  seconds ahead, so it is the avatar's pipeline). Improved Higgs accounts for it: a reply counts as playing until the
+  avatar reports `playback_finished` (it comes within ~0.1 s of the last sound), so an interruption in that tail still
+  stops it; "what was heard" is the sent position minus the lag (the measured lag is in each reply's `timing.live_lag`);
+  the echo gate compares against Higgs's output over the last 2.6 s instead of 0.6 s.
+- **Interruptions:** Meet stops Higgs ~0.5 s into the interruption as before; the avatar's pipeline would still play
+  ~1.2 s after that, so pages mute the face's audio at once on `ai_flush` for `drain` (1.25 s) and cover its still
+  moving lips with a still of the face listening (taken every second while it's quiet), then show it live again.
+  `ai_gain` (ducking for a "mm-hm") sets its volume. `tests/live_cut.py` (2026-10-24, live face on, 2 runs): 16/16 cut-ins
+  stopped Higgs 0.47–0.56 s after they began, 0/8 "Mm-hm." did. Feeding the turn-taking models Higgs's voice delayed by
+  the face's lag, as people hear it (`MEET_LIVE_ALIGN=1`), changed nothing (0.51 s vs 0.49 s), so it is off.
+- **When the avatar goes away** (expired, ended by Boson): the room starts a new session and pages switch to it
+  (`tests/live_avatar_recover.py`: the avatar removed from its LiveKit room; pages told in 0.1 s, the new face
+  there 1.8 s later and speaking).
+- **Faces:** Boson's presets only (`MEET_LIVE_AVATAR_ID`: `builtin_claire_v1` (default), `builtin_emma_v1`,
+  `builtin_james_v1`); a custom portrait isn't offered for live sessions. Video 480x640 at 24 fps (a new viewer starts
+  on LiveKit's 240x320 layer and steps up within ~10 s).
+- Bots and `tests/scenarios.py` still hear slot 0 on the socket (when it is sent, not when the face says it).
+- Env: `MEET_LIVE_AVATAR=0` (rendered face even with LiveKit set), `MEET_LIVE_AVATAR_ID`, `MEET_LIVE_AVATAR_MAX`
+  (session length, 3600 s, the account cap; then a new session).
 
 Scripted test (`tests/meeting_run.py`): roommates meeting B2 from Third Voice's test set, 3 people, 32 lines, 6
 where the AI should speak. Each person's lines are their own fake microphone in headless Chromium, so the
@@ -121,6 +212,23 @@ twenty-five…". Improved misses: what "E24" means (a question only the fact she
 replies 1.1–2.7 s, all five things it said right (both amounts, what E24 means, the lease section, the rent date); the
 extra "speak" was a garbled "Wren-five." and was dropped unheard. Default the same morning: spoke 24 times, cut off
 by people 36 times.)
+
+### 2026-10-24 (branch `worktree-live-face-2`)
+
+Improved mode, live face on where noted, real Higgs:
+
+| test | result |
+|---|---|
+| `scenarios.py --set all` (37 scenes) | 103/104 on the final commit, reply heard median 1.46 s, p90 2.52 s (102–104 across runs; the misses: a quiet −6 dB interruption, a judge borderline) |
+| `--set 9` (2026-10-23 edges) / `--set 10` (group turn-taking edges) / `--set 8` (barge-in) | 30/30, 11/11, 5/5 |
+| `--set 3` (avatar, live face) / `--set 7` (five people, drop/rejoin, flips) / `--set 5`, `--set 6` | 15/15, 18/18, 6/6, 9/9 |
+| `--set 4` (past the 5-minute idle timeout) | 6/6 |
+| MSI-Bench through the call | 22/24 answered, 1–3 premature across runs, median 1.21–1.35 s (main, at the same time: 21–22/24, 0–1 premature, 1.36–1.43 s) |
+| `soak.py --cycles 40 --avatar` (20 min, live face) | 40/40 questions answered, median ~1.75 s, one live session throughout |
+| B2 meeting in 3 Chromium pages with the live face | 26/26 silent, 5/6 speak on the final commit (4/6 earlier; misses: what "E24" means, an implicit correction) |
+| `browser_bc.py --mode improved --avatar` (real Chrome mic) | 8/8 answered, 0/8 backchannels stopped it |
+| `live_avatar_browser.py` / `live_avatar_recover.py` / `fake_room.py` | 13/13, 6/6, 49/49 |
+| live face heard after a question (`live_avatar_e2e.py`) | 2.55–3.1 s, median 2.77 s (was 3.07 s) |
 
 ### Interactive scenarios (2026-10-23, `tests/scenarios.py`)
 
@@ -166,7 +274,9 @@ Env: `MEET_SAMPLES` (judge samples per line; default 1 in a one-to-one call, 3 w
 `v5`), `MEET_LINE_SILENCE` (0.30), `MEET_ECHO_DB` (25), `MEET_SPECULATE` (1), `MEET_LANG` (en), `MEET_SPARE_SIGNALS`
 (2 preloaded turn-taking model processes), `MEET_SIGNALS=0` (no per-person turn-taking models: timing falls back to
 silence rules), `MEET_VOICE` (preset voice, default `chloe`), `MEET_SPEECH` (`realtime` or `tts`, see Speaking),
-`MEET_STT_FALLBACK=0` (no local transcription when Higgs STT fails: on 2026-10-23 it answered most lines with "the transcription is not available right now" after ~3 s, so faster-whisper base.en transcribes a line Higgs hasn't within `MEET_STT_WAIT` = 1.0 s; logged as `stt_fallback`).
+`MEET_STT_FALLBACK=0` (no local transcription when Higgs STT fails: on 2026-10-23 it answered most lines with "the transcription is not available right now" after ~3 s, so faster-whisper base.en transcribes a line Higgs hasn't within `MEET_STT_WAIT` = 1.0 s; logged as `stt_fallback`). 2026-10-24:
+`MEET_NAME_CHECK=0` (no local second opinion on the AI's name), `MEET_NAME_WAIT` (0.8), `MEET_WORDS` (word list,
+`/usr/share/dict/words`), `MEET_ONEHOP=0`, `MEET_EARLY_READ=0`, `MEET_RESUME=0` (a reply stopped by a "mm-hm" stays stopped).
 
 ## Running it for real (2026-10-23 notes)
 
@@ -182,9 +292,10 @@ silence rules), `MEET_VOICE` (preset voice, default `chloe`), `MEET_SPEECH` (`re
 - **Showing default vs improved live:** default Higgs is reliably derailed by a clear "yeah" or "uh-huh" while it
   talks (it stops and answers the backchannel), by a mid-sentence thinking pause (it talks over it), and by people
   talking to each other (it answers them). A soft hummed "mm" often doesn't trigger its voice detector at all.
-- **Avatar:** in improved the face says "Hmm." ~1.5–2.4 s after the line and the answer follows ~2–3 s later (it
-  waits for a quiet moment if someone talks into that pause); in default the reply just comes ~3 s later than without
-  the face.
+- **Avatar:** with LiveKit set, the live face (above): replies come ~1.3–1.7 s later than without the face, and
+  pages need to reach `*.livekit.cloud` (WebRTC). Rendered face: in improved the face says "Hmm." ~1.5–2.4 s after the
+  line and the answer follows ~2–3 s later (it waits for a quiet moment if someone talks into that pause); in default
+  the reply just comes ~3 s later than without the face.
 
 ## Rooms
 
@@ -209,7 +320,8 @@ run's lines and decisions can be matched to script steps.
   `bufferedAmount` > 64 KB); server → client 1 byte slot + JPEG, newest frame per sender wins. Slot 0 = Higgs avatar:
   fMP4 chunks for a MediaSource, between `avatar_start {mime}` and `avatar_stop`; `avatar_idle {url}` loops a file.
 - Server → client JSON: `roster`, `chat`, `ai_flush`, `ai_gain`, `ai_state` (+ `by` when a person changed it),
-  `line`, `ai_say`, `lab`. Client → server JSON: `chat`, `set_mode`, `set_avatar`, plus `mic`/`cam` `{on}` (roster
+  `line`, `ai_say`, `lab`, `live_avatar` (`{on: true, url, token, room, identity, drain}`: join this LiveKit room
+  subscribe-only and play `identity`'s tracks as Higgs; `{on: false}`: leave it). Client → server JSON: `chat`, `set_mode`, `set_avatar`, plus `mic`/`cam` `{on}` (roster
   shows muted/camera-off).
 
 ## Agent interface (see `room.py`)
@@ -229,12 +341,23 @@ These only enqueue: each socket has its own sender, audio for a client that fall
 ## Test
 
     python tests/fake_room.py      # 3 headless Chromium pages with fake voices and cameras, then HTTPS; no Higgs calls
+    python tests/live_avatar_browser.py   # the live face in 2 Chromium pages, stub agent (a real avatar session, ~1 min)
+    python tests/live_avatar_probe.py     # the avatar alone: session start, lag, dropouts, clear(), fps
+    python tests/live_avatar_lag.py       # where the avatar's lag comes from (new utterance / burst / warm stream)
+    python tests/live_avatar_recover.py   # the avatar removed mid-call: a new session reaches the page and speaks
     python -m pytest tests/test_floor.py tests/test_agent_rules.py   # timing + text rules, no API (./run.sh tests)
 
 With Higgs (each makes real API calls; keep to ~3 servers at once, Higgs caps concurrent sessions per key):
 
     python tests/scenarios.py --set all --modes improved default --par 3   # 37 interactive scenes, bots over /ws/room
     python tests/scenarios.py --set 3     # with the Avatar     --set 4: past Higgs's 5-minute idle timeout
+    python tests/live_avatar_e2e.py       # live face: when it is heard after a question, and an interruption
+    python tests/scenarios.py --set 9     # 2026-10-23 edges: trailing "Oh.", repeated questions, rudeness, names, long mm-hms, same room
+    python tests/scenarios.py --set 10    # group turn-taking: two asking at once, named in the third person, a pause after the name
+    python tests/fact_cases.py            # fact-checks on misheard fact-sheet names vs real mistakes
+    python tests/live_face_shots.py       # screenshots of the live face: idle, thinking, just cut off
+    python tests/name_stt.py collect && python tests/name_stt.py score   # the AI's name through Higgs STT (7 voices)
+    python tests/onehop_bench.py          # write-then-read vs answering in audio straight from the writer
     python tests/judge_cases.py [--file judge_heldout.jsonl]   # the speak/silent decision on 63 / 120 written lines
     python tests/tv_regress.py --set test --prompts v4b v5     # Third Voice's group test set through agent.decide
     python tests/writer_cases.py          # what the reply writer says, two prompt versions side by side

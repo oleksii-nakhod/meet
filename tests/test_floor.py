@@ -166,6 +166,12 @@ def test_truncate_cuts_at_the_right_sentence():
     assert truncate(TEXT, SEGS, 9.0) == TEXT + " —"
 
 
+def test_truncate_keeps_the_words_of_a_long_sentence():
+    segs = [(0.0, 4.0, "Bicycle gears work by changing the ratio between the pedals and the wheel.")]
+    assert truncate("", segs, 2.0) == "Bicycle gears work by changing the —"  # 6 of 13 words in 2 of 4 s
+    assert truncate("", segs, 0.5) == "—"  # one word: nothing to remember
+
+
 def test_lagging_detector_gets_more_patience():
     # a 0.55 s "mm-hm" with VAP saying "taking the floor": with an up-to-date detector that is late with its
     # verdict (p_bc 0.1), it's an interruption at interrupt_after; if the detector is 0.3 s behind, wait for it

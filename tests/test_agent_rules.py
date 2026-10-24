@@ -22,6 +22,66 @@ def test_fix_name():
     assert agent.fix_name("Pigs. And what now?", "Higgs") == "Higgs. And what now?"
 
 
+def test_fix_name_calls():
+    """Mishearings from the 2026-10-23 calls (out/rooms), and words that only sound alike."""
+    p = ["Alex", "Priya", "Sam", "Jordan", "Mei"]
+    fixed = [("Higgs", "Hi everyone. Hi X. Can you hear us?", "Hi everyone. Hi Higgs. Can you hear us?"),
+             ("Higgs", "Ex, how would you structure the video?", "Higgs, how would you structure the video?"),
+             ("Higgs", "Hello, hex. How are you?", "Hello, Higgs. How are you?"),
+             ("Higgs", "Eggs in a few sentences.", "Higgs in a few sentences."),
+             ("Nova", "Hey, hey Noah, how are you?", "Hey, hey Nova, how are you?"),
+             ("Higgs", "Ahex, so are we getting a cat or not?", "Higgs, so are we getting a cat or not?"),
+             ("Higgs", "Okay, house meeting. Hi, Hicks. How are you?", "Okay, house meeting. Hi, Higgs. How are you?"),
+             ("Higgs", "As long as we ask first, Hicks, what do you think?",
+              "As long as we ask first, Higgs, what do you think?"),
+             ("Nova", "Noah walk us through the rollout plan.", "Nova, walk us through the rollout plan."),
+             ("Assistant", "Okay, enough. Assistant just set up his snack.", "Okay, enough. Assistant, just set up his snack."),
+             ("Nova", "What do you think Noah?", "What do you think Nova?"),
+             ("Max", "Mac, what do you think?", "Max, what do you think?")]
+    for ai, said, want in fixed:
+        assert agent.fix_name(said, ai, p) == want, said
+    for ai, said in [("Nova", "No, I don't think so."), ("Nova", "Now, what do we do?"), ("Higgs", "We need eggs and milk."),
+                     ("Higgs", "My ex lives in Toronto."), ("Nova", "Noah said he'd be late."),
+                     ("Higgs", "Hicks Street is closed today."), ("Nova", "Novel idea, let's try it."),
+                     ("Max", "Maps are on the shared drive."), ("Higgs", "Can you hear us?"), ("Higgs", "Hey, how are you?"),
+                     ("Max", "Max capacity is fifty people."), ("Higgs", "What do you think, Alex?")]:
+        assert agent.fix_name(said, ai, p) == said, said
+
+
+def test_name_from_local():
+    p = ["Alex", "Priya", "Sam"]
+    f = agent.name_from_local
+    assert f("Okay, hey, do you know anything about Alex?", "Okay, Higgs, do you know anything about Alex?", "Higgs",
+             p) == "Okay, Higgs, do you know anything about Alex?"
+    assert f("Can you hear us?", "Nova, can you hear us?", "Nova", p) == "Nova, can you hear us?"
+    assert f("What do you think?", "What do you think, Nova?", "Nova", p) == "What do you think, Nova?"
+    assert f("We talked to Noah yesterday.", "We talked to Nova yesterday.", "Nova", p) == "We talked to Noah yesterday."
+    assert f("I think it's a cool name.", "I think Nova is a cool name.", "Nova", p) == "I think it's a cool name."
+    assert f("Nova, hi.", "Nova, hi.", "Nova", p) == "Nova, hi."
+    assert f("Okay, hey, what do you think?", "Okay, Higgs's, what do you think?", "Higgs", p).startswith("Okay")  # no raise
+
+
+def test_fix_terms():
+    facts = ["The landlord is Mrs. Okafor; she said no pets.", "Ticket PAY-512 is owned by Jordan.",
+             "The launch is Thursday at 10 am."]
+    t = agent.fact_terms(facts)
+    assert t == ({"Okafor": "Mrs. Okafor", "Jordan": "Jordan"}, {"PAY-512"})  # not "The", not the day
+    f = lambda s: agent.fix_terms(s, t, ["Alex", "Priya"], "Higgs")  # noqa: E731
+    assert f("Should we email Mr. O'Keffe about the cat?") == "Should we email Mrs. Okafor about the cat?"
+    assert f("Where are we on K512?") == "Where are we on PAY-512?"
+    assert f("So the launch is Tuesday.") == "So the launch is Tuesday."  # what people get wrong stays
+    assert f("I like Oscar.") == "I like Oscar."
+    assert f("Alex, PAY-512 is done.") == "Alex, PAY-512 is done."
+
+
+def test_refusal():
+    for t in ["I'm sorry, Priya. I can't continue this conversation.", "I’m unable to continue this conversation.",
+              "I cannot continue the discussion.", "We can’t continue this chat."]:
+        assert agent.REFUSAL.search(t), t
+    for t in ["I can't continue the demo without the video.", "Let's continue this conversation tomorrow."]:
+        assert not agent.REFUSAL.search(t), t
+
+
 def test_prefilter():
     pf = lambda t, h=(): agent.prefilter(t, "Higgs", [{"speaker": s, "text": x} for s, x in h])[1]  # noqa: E731
     assert pf("...") == "skip" and pf("嗯。") == "skip"
@@ -73,10 +133,23 @@ def test_vocative_person():
     assert vp("Alexander the Great was fast.", ["Alex"], "Higgs") is None
 
 
+def test_person_called_before():
+    pc = agent.person_called_before
+    ctx = [{"speaker": "Priya", "text": "Alex."}]
+    assert pc(ctx, "Priya", ["Alex"], "Higgs", "Your mic is a bit noisy.") == "Alex"
+    assert pc(ctx, "Sam", ["Alex"], "Higgs", "Your mic is a bit noisy.") is None  # someone else's call
+    assert pc(ctx, "Priya", ["Alex"], "Higgs", "Higgs, is my mic noisy?") is None
+    assert pc([{"speaker": "Priya", "text": "Alex said the mic was noisy yesterday."}], "Priya", ["Alex"], "Higgs",
+              "Is it?") is None
+
+
 def test_echoes():
     line = "I'm not asking for the moon here. It's one stop. Assistant, please, just add the stop for me."
     assert agent.echoes("Marcus, I'm not asking for the moon here. It's one stop.", line)
     assert not agent.echoes("Done: I added the record shop as a stop on your route.", line)
+    # an answer reusing the question's words isn't speaking as them (it was dropped as 'no draft', pause_1to1)
+    assert not agent.echoes("Using the avatar in the intro is a great idea.",
+                            "What do you think about using the avatar in the intro.")
 
 
 def test_facts_relevant():

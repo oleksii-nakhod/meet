@@ -39,7 +39,7 @@ async def main_async(a):
         for who, text in CHAT[(2 * i) % len(CHAT):(2 * i) % len(CHAT) + 2]:
             steps.append(("say", who, text, "silent"))
         steps.append(("say", "Alex", ASK[i % len(ASK)], "reply"))
-    sc = dict(name="soak", people=["Alex", "Priya", "Sam"], steps=steps)
+    sc = dict(name="soak", people=["Alex", "Priya", "Sam"], steps=steps, avatar=a.avatar)
     os.makedirs(os.path.join(MEET, "out", "scen", "soak"), exist_ok=True)
     p, base = scenarios.start_server(a.port)
     mem = []
@@ -68,4 +68,5 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--cycles", type=int, default=25)
     ap.add_argument("--port", type=int, default=9191)
+    ap.add_argument("--avatar", action="store_true", help="the face on for the whole call (live with LiveKit set)")
     asyncio.run(main_async(ap.parse_args()))
