@@ -1890,6 +1890,11 @@ class HiggsAgent:
             if max((len(q) for q in self.inq.values()), default=0) > 2:
                 self.stats["catchup"] += 1
                 await asyncio.sleep(0)  # audio is waiting: next tick now (let the sockets run in between)
+                # and the schedule restarts from now: a catch-up tick is time that has already passed. Counted as a
+                # scheduled tick, it put the schedule ahead of the clock after a burst of input, and the loop then slept
+                # ~1 s while everyone's audio queued, caught up in a burst, slept again: Higgs's voice came in bursts
+                # the browsers' 300 ms queues cut to pieces (2026-10-23)
+                t0, k = time.perf_counter(), 0
                 continue
             if delay > 0:
                 await asyncio.sleep(delay)
