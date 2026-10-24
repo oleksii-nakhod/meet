@@ -60,6 +60,19 @@ def test_name_from_local():
     assert f("Okay, hey, what do you think?", "Okay, Higgs's, what do you think?", "Higgs", p).startswith("Okay")  # no raise
 
 
+def test_fix_terms():
+    facts = ["The landlord is Mrs. Okafor; she said no pets.", "Ticket PAY-512 is owned by Jordan.",
+             "The launch is Thursday at 10 am."]
+    t = agent.fact_terms(facts)
+    assert t == ({"Okafor": "Mrs. Okafor", "Jordan": "Jordan"}, {"PAY-512"})  # not "The", not the day
+    f = lambda s: agent.fix_terms(s, t, ["Alex", "Priya"], "Higgs")  # noqa: E731
+    assert f("Should we email Mr. O'Keffe about the cat?") == "Should we email Mrs. Okafor about the cat?"
+    assert f("Where are we on K512?") == "Where are we on PAY-512?"
+    assert f("So the launch is Tuesday.") == "So the launch is Tuesday."  # what people get wrong stays
+    assert f("I like Oscar.") == "I like Oscar."
+    assert f("Alex, PAY-512 is done.") == "Alex, PAY-512 is done."
+
+
 def test_refusal():
     for t in ["I'm sorry, Priya. I can't continue this conversation.", "I’m unable to continue this conversation.",
               "I cannot continue the discussion.", "We can’t continue this chat."]:

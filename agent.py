@@ -405,6 +405,50 @@ def name_like(w, ai, people=(), strong=True):
     return r >= (0.6 if strong else 0.8) and not any(sound_sim(lw, p) >= r for p in people)
 
 
+def fact_terms(facts):
+    """Names and codes in the fact sheet that STT may mishear: capitalized words of 4+ letters that aren't ordinary
+    words ("Okafor", "Lisbon"; not "She", nor days and months, which is what people get wrong), and codes with digits
+    ("PAY-512")."""
+    words, codes = {}, set()  # words: name -> how the facts write it, with its title ("Okafor" -> "Mrs. Okafor")
+    for f in facts:
+        codes |= set(re.findall(r"\b[A-Z]{2,}-?\d+\b", f))
+        for m in re.finditer(r"\b(?:(Mr|Mrs|Ms|Dr)\.?\s+)?([A-Z][a-z][A-Za-z'’]{2,})\b", f):
+            w = m.group(2)
+            if m.start() > 0 and not english_word(w.lower()) and w.lower() not in NOT_NAME:  # not the fact's first word
+                words[w] = f"{m.group(1)}. {w}" if m.group(1) else words.get(w, w)
+    return words, codes
+
+
+def fix_terms(text, terms, people=(), ai=""):
+    """A name or code from the fact sheet that STT misheard ("Mr. O'Keffe" for Mrs. Okafor, "K512" for PAY-512) is put
+    back as the facts spell it, so the fact-check and the writer don't 'correct' the person for it (they did, twice,
+    on 2026-10-23). A capitalized word that sounds like a fact name (sound_sim >= 0.8; not an English word, a person in
+    the call or the AI), or a code with the same digits."""
+    words, codes = terms
+    skip = {p.lower() for p in people} | {ai.lower()}
+
+    def word(m):
+        title, w = m.group(1), m.group(2)
+        lw = w.lower().replace("’", "'")
+        if lw in skip or english_word(lw) or lw in NOT_NAME:
+            return m.group(0)
+        best = next((t for t in words if lw == t.lower()), None) or max(words, key=lambda t: sound_sim(lw, t), default=None)
+        if best is None or (lw != best.lower() and sound_sim(lw, best) < 0.8):
+            return m.group(0)
+        full = words[best]  # with the facts' title, if a title was said ("Mr. O'Keffe" -> "Mrs. Okafor")
+        return full if title and full != best else f"{title}. {best}" if title else best
+
+    def code(m):
+        c = m.group(0)
+        digits = re.sub(r"\D", "", c)
+        return next((k for k in codes if re.sub(r"\D", "", k) == digits and k.upper() != c.upper()), c)
+    if words:
+        text = re.sub(r"\b(?:(Mr|Mrs|Ms|Dr)\.?\s+)?([A-Z][A-Za-z'’]{2,})\b", word, text)
+    if codes:
+        text = re.sub(r"\b[A-Za-z]{1,4}-?\d{2,}\b", code, text)
+    return text
+
+
 def trivial(text):
     """Only listener sounds and fillers, however many ("Oh. Oh. Okay. Yes.", "Yeah, yeah, um."), not asked."""
     words = re.findall(r"[a-z][a-z'-]*", text.lower())
@@ -1600,7 +1644,7 @@ class ImprovedBrain:
         a = self.a
         try:
             t0 = time.perf_counter()
-            text = (await asyncio.to_thread(LOCAL_STT.transcribe, pcm)).strip()
+            text = fix_terms((await asyncio.to_thread(LOCAL_STT.transcribe, pcm)).strip(), fact_terms(a.facts), a.names(), a.ai)
             # a line so far that can't contradict a fact yet: too short, or nothing like a fact (FACTY, the fact sheet)
             if (len(re.findall(r"[A-Za-z0-9']+", text)) < BARGE_WORDS or li.line_audio is not line
                     or not (FACTY.search(text) or facts_relevant(text, [], a.facts, [a.ai] + a.names()))):
@@ -1693,6 +1737,7 @@ class ImprovedBrain:
         if merged:  # they went on after a pause: one line (the transcript panel replaces the fragment)
             text = join_pieces(a.history.pop()["text"], text)
         text, kind = prefilter(text, a.ai, a.history, a.names())
+        text = fix_terms(text, fact_terms(a.facts), a.names(), a.ai)  # "Mr. O'Keffe" for Mrs. Okafor (fact sheet)
         if self.paused is not None and kind != "skip":
             small = kind in ("backchannel", "filler") or trivial(text)
             if (small and self.paused["li"] is li and self.playing is None and self.pending is None
