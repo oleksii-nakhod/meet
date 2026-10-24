@@ -79,6 +79,12 @@ FACT_MIN_CONF = float(os.environ.get("MEET_FACT_MIN_CONFIDENCE", "0.8"))  # a co
 FACT_COOLDOWN = float(os.environ.get("MEET_FACT_COOLDOWN", "20"))     # seconds between two corrections
 CORRECTION_GUARD = float(os.environ.get("MEET_CORRECTION_GUARD", "2"))  # a correction can't be talked down this long
 INSIST_S = 0.6           # after the guard, someone must keep interrupting this long to stop a correction
+# Wrong facts don't wait for the speaker to finish: every MIDCHECK_EVERY s of new speech, what they've said so far is
+# transcribed (probe session, ~0.3 s) and fact-checked against everything (fact sheet, documents, what others said,
+# well-established general knowledge); a confirmed error cuts in mid-sentence.
+MIDCHECK = os.environ.get("MEET_MIDCHECK", "1") == "1"
+MIDCHECK_EVERY = float(os.environ.get("MEET_MIDCHECK_EVERY", "1.0"))
+GENERAL_FACTS = os.environ.get("MEET_GENERAL_FACTS", "1") == "1"  # also correct well-established general knowledge
 NOISE_GATE = os.environ.get("MEET_NOISE_GATE", "1") == "1"  # spectral noise gate on each person's speech detector
 LEX = words.lexicon(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "fillers.en.yaml"))
 DURING = " [said while you were correcting]"
@@ -1041,6 +1047,10 @@ class Listener:
         self.cur, self.voiced = [], 0.0  # this line's audio and voiced seconds so far (for the barge-in probe)
         self.probe_task, self.probed_at = None, 0.0
         self.during = False      # part of this line was said over one of Higgs's corrections
+        self.line_seq = 0        # bumped at every commit: which line a mid-sentence check belongs to
+        self.checked_voiced, self.mid_task, self.mid_text = 0.0, None, ""
+        self.corrected_seq = -1  # the line a mid-sentence correction already answered
+        self.stream_t = 0.0      # perf_counter when this line's speech began
 
     def _new_session(self):
         tr = {"model": "higgs-stt-3.1", **({"language": LANG} if LANG else {})}
@@ -1135,6 +1145,7 @@ class Listener:
             self._reopen()  # idle timeout / max duration / network: what they say next waits in the backlog
         if self.speaking and not self.streaming:  # only speech (plus 200 ms before it) goes to transcription
             self.streaming = True
+            self.stream_t = time.perf_counter()
             for f in self.preroll:
                 await self._append(f)
             self.preroll.clear()
@@ -1168,6 +1179,8 @@ class Listener:
                 audio, self.line_audio = self.line_audio, []
                 during, self.during = self.during, False
                 self.cur, self.voiced = [], 0.0
+                self.line_seq += 1
+                self.checked_voiced, self.mid_text = 0.0, ""
                 if self.open:
                     asyncio.ensure_future(self._transcribe(time.perf_counter(), audio, during))
                 else:
@@ -1175,6 +1188,12 @@ class Listener:
             elif act == "resume":
                 self.merge = True
                 self.b.on_resume(self)
+
+    @staticmethod
+    def guard_text(text):
+        """Drop what isn't words: empty, or a hum transcribed in another script."""
+        t = (text or "").strip()
+        return t if re.search(r"[A-Za-z]", t) else ""
 
     async def _transcribe(self, t_end, audio=(), during=False):
         self.decided_early = False
@@ -1326,7 +1345,8 @@ class ImprovedBrain:
         self.models = boson_http.Models(spend=spend, language=LANG)
         # contradictions: checked against the fact sheet, the documents and what people said earlier; a correction
         # needs cited evidence that really exists in its source (fact_monitor.py)
-        self.monitor = fact_monitor.Monitor(min_confidence=FACT_MIN_CONF, cooldown_s=FACT_COOLDOWN)
+        self.monitor = fact_monitor.Monitor(min_confidence=FACT_MIN_CONF, cooldown_s=FACT_COOLDOWN,
+                                            general=GENERAL_FACTS)
         self.probe = ProbeSTT(self.models)
         self.insist = {}          # slot -> when they first kept interrupting a correction after its guard
         self.tasks = set()
@@ -1635,6 +1655,19 @@ class ImprovedBrain:
                          "evidence": v.evidence, "confidence": v.confidence, "s": round(time.perf_counter() - t0, 2)})
         return v
 
+    async def _midcheck(self, li, seq):
+        """Fact-check what someone has said so far, while they are still talking; a confirmed error cuts in now."""
+        text = Listener.guard_text(await self.probe.transcribe(np.concatenate(li.cur))) if li.cur else ""
+        if li.line_seq != seq or not fact_monitor.claim_like(text) or text == li.mid_text:
+            return
+        li.mid_text = text
+        v = await self._check(li, text, f"{self.line_no + 1}-mid", list(self.a.history))
+        if v.contradicts and li.corrected_seq != seq and not self.stopped:
+            li.corrected_seq = seq
+            self.a.room.log({"type": "mid_correction", "slot": li.slot, "said_so_far": text,
+                             "voiced_s": round(li.voiced, 2), "still_talking": li.line_seq == seq})
+            await self._correct(li, self.line_no + 1, text, time.perf_counter(), v)
+
     def _late(self, fut, li, line_id, text, t_end):
         if fut.cancelled() or fut.exception() is not None or self.stopped:
             return
@@ -1672,8 +1705,11 @@ class ImprovedBrain:
             return
         now = time.perf_counter()
         if r.intervention:
-            if now - r.marks.get("play_started", now) < CORRECTION_GUARD:
+            started = r.marks.get("play_started", now)
+            if now - started < CORRECTION_GUARD:
                 return  # inside the guard: keep talking over them (what they say is held, then answered)
+            if li.stream_t < started:
+                return  # they're carrying on what they were saying before it cut in: that isn't pushing back
             first = self.insist.setdefault(li.slot, now)
             if now - first < INSIST_S:
                 return  # a line that just ran past the guard doesn't count; still pressing does
@@ -1703,6 +1739,11 @@ class ImprovedBrain:
         for li in self.listeners.values():
             if not li.streaming:
                 li.probed_at = 0.0
+            elif (MIDCHECK and PROACTIVE_FACTS and not self.intervention_active and li.corrected_seq != li.line_seq
+                  and li.voiced >= MIDCHECK_EVERY and li.voiced - li.checked_voiced >= MIDCHECK_EVERY
+                  and (li.mid_task is None or li.mid_task.done())):
+                li.checked_voiced = li.voiced
+                li.mid_task = self._spawn(self._midcheck(li, li.line_seq))
         anyone = any(li.speaking for li in self.listeners.values())
         self.take.tick(t, anyone)
         if anyone:

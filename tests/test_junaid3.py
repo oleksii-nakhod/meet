@@ -92,8 +92,9 @@ def brain():
     return b
 
 
-def listener(slot=2):
-    return SimpleNamespace(slot=slot, name="Mei", cur=[np.zeros(480, np.int16)], voiced=1.0)
+def listener(slot=2, stream_t=None):
+    return SimpleNamespace(slot=slot, name="Mei", cur=[np.zeros(480, np.int16)], voiced=1.0,
+                           stream_t=time.perf_counter() if stream_t is None else stream_t)
 
 
 def probe_says(b, text):
@@ -163,7 +164,7 @@ def test_person_vs_person_claims_are_evidence():
     m = fact_monitor.Monitor()
     m.remember(fact_monitor.Claim("1", "Jordan", "The plumber is coming on Friday.", time.monotonic()))
     items = m.evidence(None, "Mei", "The plumber is coming on Monday.")
-    assert [(i, kind) for i, _, _, kind in items] == [("S1", "speaker")]
+    assert [(i, kind) for i, _, _, kind in items] == [("S1", "speaker"), ("G1", "general")]
 
 
 # ------------------------------------------------------------------ sources, config, avatar plumbing
@@ -202,3 +203,86 @@ def test_optional_models_switch_off_instead_of_falling_back_to_the_stub():
     # agent imported above without torch/maai/faster-whisper installed; those features are simply off
     assert agent.SIGNALS == agent._installed("torch", "maai") or os.environ.get("MEET_SIGNALS") == "0"
     assert agent.STT_FALLBACK in (False, True) and (agent.LOCAL_STT is None) == (not agent.STT_FALLBACK)
+
+
+# ------------------------------------------------------------------ immediate corrections, any source
+class ChatModels:
+    """check -> the scripted checker verdict; confirm -> the scripted second opinion."""
+
+    def __init__(self, verdict, confirm):
+        self.verdict, self.confirm, self.calls = verdict, confirm, []
+
+    async def chat(self, system, user, **kw):
+        self.calls.append("confirm" if "uncontroversial knowledge" in system and "Statement:" in user else "check")
+        return self.confirm if self.calls[-1] == "confirm" else self.verdict
+
+
+FLAT = ('{"contradicts": true, "evidence_id": "G1", "evidence": "The Earth is round.", "confidence": 0.97, '
+        '"correction": "Sorry to jump in, Sam, the Earth is round, not flat."}')
+
+
+def test_a_general_knowledge_error_needs_a_second_opinion():
+    m = fact_monitor.Monitor(cooldown_s=0)
+    models = ChatModels(FLAT, '{"false": true, "confidence": 0.98}')
+    v = asyncio.run(m.check(models, None, speaker="Sam", text="Since the Earth is flat, ships fall off.", setting="", history=""))
+    assert v.contradicts and v.kind == "general" and v.source == "general knowledge" and models.calls == ["check", "confirm"]
+    m2 = fact_monitor.Monitor(cooldown_s=0)
+    v = asyncio.run(m2.check(ChatModels(FLAT, '{"false": false, "confidence": 0.6}'), None, speaker="Sam",
+                             text="Since the Earth is flat, ships fall off.", setting="", history=""))
+    assert not v.contradicts and "not confirmed" in v.reason
+
+
+def test_general_knowledge_can_be_switched_off():
+    m = fact_monitor.Monitor(general=False)
+    assert all(kind != "general" for *_, kind in m.evidence(None, "Sam", "The Earth is flat."))
+
+
+def midbrain(verdict):
+    b = brain()
+    b.a.history = []
+    b.voice = lambda: None
+    b.a.rendered_avatar = False
+    b.probe = SimpleNamespace(transcribe=AsyncMock(return_value="So the lease says pets are totally fine, so we"))
+    b.monitor = SimpleNamespace(check=AsyncMock(return_value=verdict))
+    li = SimpleNamespace(slot=2, name="Mei", cur=[np.zeros(480, np.int16)], voiced=2.0, line_seq=4, corrected_seq=-1,
+                         mid_text="")
+    return b, li
+
+
+def test_a_wrong_fact_is_corrected_mid_sentence_while_they_keep_talking():
+    async def go():
+        v = fact_monitor.Verdict(True, "D1", "no pets are allowed without the landlord's written approval", 0.93,
+                                 "Sorry to jump in, Mei: the lease says no pets without written approval.",
+                                 "lease.pdf p.3", "document", "verified")
+        b, li = midbrain(v)
+        await b._midcheck(li, 4)                       # line 4 is still being said
+        assert b.pending is not None and b.pending.intervention and b.pending.source == "lease.pdf p.3"
+        assert li.corrected_seq == 4
+        b.pending.speaker.cancel()
+        b.pending = None
+        await b._midcheck(li, 4)                       # the same line is never corrected twice
+        assert b.pending is None
+    asyncio.run(go())
+
+
+def test_a_mid_sentence_check_for_a_line_that_already_ended_is_dropped():
+    async def go():
+        b, li = midbrain(fact_monitor.Verdict(False, reason="no contradiction"))
+        li.line_seq = 5                                # they finished; the line was committed meanwhile
+        await b._midcheck(li, 4)
+        b.monitor.check.assert_not_awaited()
+    asyncio.run(go())
+
+
+def test_the_corrected_speaker_carrying_on_does_not_cut_the_correction_short():
+    async def go():
+        b = brain()
+        r = SimpleNamespace(intervention=True, marks={"play_started": time.perf_counter() - 3})
+        b.playing = r
+        probe_says(b, "and that's why old maps just stop at the edge of the world")
+        monologue = listener(stream_t=time.perf_counter() - 8)    # began before the correction did
+        for _ in range(3):
+            await b._probe(monologue, r)
+            b.insist[2] = b.insist.get(2, time.perf_counter()) - 1
+        b._interrupt.assert_not_awaited()
+    asyncio.run(go())
