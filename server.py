@@ -48,6 +48,15 @@ ROOMS = {}
 app = FastAPI()
 
 
+@app.middleware("http")
+async def revalidate(request, call_next):
+    """Pages and scripts are checked for a newer version on every load (a 304 if unchanged). Without this,
+    Cloudflare kept serving a 4-hour-old room.js after an update."""
+    response = await call_next(request)
+    response.headers.setdefault("cache-control", "no-cache")
+    return response
+
+
 def free_idle_rooms():
     """Forget rooms nobody has been in for IDLE seconds (counted from creation if nobody ever joined). The agent and
     avatar already stopped when the room emptied; this frees the id and the link."""
