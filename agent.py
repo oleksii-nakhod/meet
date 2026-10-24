@@ -528,11 +528,12 @@ def maybe_named(text, ai, people=()):
     return False
 
 
-# In a group call each line is also transcribed locally with the AI's name as a hotword (from the commit, alongside Higgs
-# STT); when Higgs's transcript has no name but maybe_named, the line waits up to NAME_WAIT s more for it
+# In a group call a line whose Higgs transcript has no AI name but calls someone who isn't here (maybe_named, ~4% of
+# lines) is transcribed again locally with the AI's name as a hotword, one at a time, and waits up to NAME_WAIT s for it
 # (name_from_local). Whisper encodes a 30 s window whatever the line's length: ~0.6 s idle, 1.4 s on a loaded machine.
 NAME_CHECK = os.environ.get("MEET_NAME_CHECK", "1") == "1"
-NAME_WAIT = float(os.environ.get("MEET_NAME_WAIT", "0.8"))
+NAME_WAIT = float(os.environ.get("MEET_NAME_WAIT", "1.0"))
+NAME_BUSY = {"n": 0}  # name checks in flight (whisper jobs), process-wide: at most one
 
 
 def name_from_local(text, local, ai, people=()):
@@ -1422,9 +1423,6 @@ class Listener:
         if fallback and time.monotonic() - LOCAL_STT.last_fail < 60:  # Higgs STT is failing: don't wait for it first
             local = asyncio.ensure_future(asyncio.to_thread(LOCAL_STT.transcribe, np.concatenate(audio)))
         ai, people = self.b.a.ai, self.b.a.names()
-        named = None  # a group call: whisper listening for the AI's name, in case Higgs STT mishears it (name_from_local)
-        if NAME_CHECK and fallback and local is None and LOCAL_STT.model is not None and len(self.b.listeners) > 1:
-            named = asyncio.ensure_future(asyncio.to_thread(LOCAL_STT.transcribe, np.concatenate(audio), ai))
         try:
             await s.send({"type": "input_audio_buffer.commit"})
             _, ev = await s.wait("input_audio_buffer.committed", timeout=STT_WAIT if fallback else 10, since=since)
@@ -1454,9 +1452,16 @@ class Listener:
                 self.b.a.told_stt = True
                 await room.event({"type": "ai_note", "text": "Higgs transcription is failing right now; "
                                                              "lines are transcribed locally (Whisper) until it's back."})
-        if named is not None and text and failed is None and NAME_RE(ai).search(fix_name(text, ai, people)) is None \
-                and maybe_named(text, ai, people):
-            try:  # Higgs's transcript has no name: what whisper heard (it started with the commit)
+        # a group call, and someone is called by a name that isn't anyone here: whisper, listening for the AI's name,
+        # gets a say (name_from_local). Only then, and one at a time: started for every line, these whisper jobs
+        # queued up behind each other on MSI-Bench's long lines, and an STT fallback waited 90 s behind them.
+        if (NAME_CHECK and fallback and text and failed is None and len(self.b.listeners) > 1 and LOCAL_STT.model is not None
+                and not NAME_BUSY["n"] and NAME_RE(ai).search(fix_name(text, ai, people)) is None
+                and maybe_named(text, ai, people)):
+            NAME_BUSY["n"] += 1
+            named = asyncio.ensure_future(asyncio.to_thread(LOCAL_STT.transcribe, np.concatenate(audio), ai))
+            named.add_done_callback(lambda f: NAME_BUSY.update(n=NAME_BUSY["n"] - 1) or f.exception())
+            try:
                 heard = await asyncio.wait_for(asyncio.shield(named), NAME_WAIT)
             except Exception:  # noqa: BLE001  (too slow, or whisper failed: Higgs's transcript as it is)
                 heard = ""
