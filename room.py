@@ -328,14 +328,6 @@ class Room:
         asyncio.ensure_future(self._lifecycle())
         return h
 
-    def close(self, code=4005):
-        """Disconnect everyone (4005: a new meeting replaced this one at the same link; pages reload into it)."""
-        self.log({"type": "replaced"})
-        for h in list(self.humans.values()):
-            h.out.close(code)
-            if h.video:
-                h.video.close(code)
-
     def leave(self, h):
         if self.humans.get(h.slot) is not h:
             return  # already replaced by a reconnect

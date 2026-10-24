@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Meet on a public link: the server on localhost:8600 plus a Cloudflare quick tunnel (https://<random>.trycloudflare.com,
-# no account; mic and camera work because it's HTTPS). Anyone with a room link + passcode can join and use Higgs on
-# your API key, so share room links only with people you trust; creating rooms needs the admin token printed below.
+# no account; mic and camera work because it's HTTPS). Anyone who opens the link can create a room or join one by its
+# ID or link (+ passcode) and use Higgs on your API key; MEET_BUDGET caps the spend, MEET_ADMIN locks room creation.
 #   ./public.sh            (Ctrl-C stops both)
-# Env: MEET_ADMIN (default: a random token), MEET_BUDGET (Higgs requests per server run, default 30000),
+# Env: MEET_ADMIN (default: none; set it to make creating rooms need /?admin=<token>),
+#      MEET_BUDGET (Higgs requests per server run, default 30000), MEET_MAX_ROOMS (default 100),
 #      CLOUDFLARED (default ~/.local/opt/cloudflared/cloudflared),
-#      MEET_ROOM: the one meeting link /r/<id> (default Yrw_p1Ja-3U; empty: every new room gets its own link),
+#      MEET_ROOM: a default room /r/<id> that exists from the start (default Yrw_p1Ja-3U; empty: none),
 #      MEET_HOST: your own hostname (e.g. meet.example.com) via a named tunnel made in the Cloudflare dashboard (Zero Trust
 #      -> Networks -> Tunnels; DNS: CNAME <host> -> <tunnel id>.cfargotunnel.com, proxied); its token goes in MEET_TUNNEL_TOKEN_FILE
 #      (default ~/.cloudflared/meet.token, chmod 600). Without MEET_HOST: a random trycloudflare.com link.
@@ -13,7 +14,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PY="${PYTHON:-$HERE/.venv/bin/python}"; [ -x "$PY" ] || PY=python3
 CF="${CLOUDFLARED:-$HOME/.local/opt/cloudflared/cloudflared}"
-export MEET_ADMIN="${MEET_ADMIN:-$("$PY" -c 'import secrets; print(secrets.token_urlsafe(9))')}"
+export MEET_ADMIN="${MEET_ADMIN:-}"
 export MEET_ROOM="${MEET_ROOM-Yrw_p1Ja-3U}"
 cd "$HERE" && mkdir -p out
 CFP=""
@@ -38,9 +39,9 @@ fi
 [ -z "${URL:-}" ] && { echo "tunnel didn't come up; see out/cloudflared.log"; exit 1; }
 kill -0 $SRV 2>/dev/null || { echo "the server didn't start (is another ./public.sh still running on port 8600?)"; exit 1; }
 echo
-[ -n "$MEET_ROOM" ] && echo "  Meeting link:   $URL/r/$MEET_ROOM  (setting up a new meeting replaces the one there)"
-echo "  Create a room:  $URL/?admin=$MEET_ADMIN"
-echo "  (then share the room link it gives you; the admin link is only for you)"
+echo "  Meet:          $URL/  (join a room by ID or link, or create one)"
+[ -n "$MEET_ROOM" ] && echo "  Default room:  $URL/r/$MEET_ROOM"
+[ -n "$MEET_ADMIN" ] && echo "  Create rooms:  $URL/?admin=$MEET_ADMIN  (MEET_ADMIN is set: only for you)"
 echo
 # Quick tunnels can be dropped by Cloudflare ("Tunnel not found", 2026-10-23 03:37): if either side stops, say so and
 # stop the other, rather than leaving a server nobody can reach.
