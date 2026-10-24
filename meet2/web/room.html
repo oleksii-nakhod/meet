@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meet 2.0 · Room</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<section id="join">
+  <div class="card">
+    <h1 id="jtitle">Joining…</h1>
+    <div class="sub" id="jsub"></div>
+    <div id="jform" class="hidden">
+      <label for="jname">Your name</label><input id="jname" maxlength="40" autocomplete="name">
+      <div id="jkrow" class="hidden"><label for="jk">Passcode</label><input id="jk" maxlength="64" autocomplete="off"></div>
+      <label class="row" style="color:var(--ink);margin-top:14px"><input type="checkbox" id="jcam" checked style="width:auto"> Camera on</label>
+      <div class="row" style="margin-top:16px"><button id="jgo" class="primary">Join with microphone</button></div>
+    </div>
+    <div id="jerr" class="sub" style="color:var(--bad);margin-top:10px"></div>
+  </div>
+</section>
+
+<section id="call" class="hidden">
+  <header id="top">
+    <span class="title" id="rtitle"></span>
+    <span class="sub" id="count"></span>
+    <span class="pill" id="aistate">idle</span>
+    <span class="grow"></span>
+    <span class="pill" id="transport">voice only</span>
+    <button id="invite">Copy invite link</button>
+  </header>
+  <div id="body">
+    <div id="stage">
+      <div id="banner" class="hidden"></div>
+      <div id="grid"></div>
+    </div>
+    <aside id="side">
+      <div class="tabs">
+        <button data-tab="lines" class="on">Transcript</button>
+        <button data-tab="notes">Notes</button>
+        <button data-tab="kb">Knowledge</button>
+        <button data-tab="chat">Chat</button>
+      </div>
+      <div class="pane" id="pane-lines"><ul class="lines" id="lines"><li class="empty">Lines appear here as people talk.</li></ul></div>
+      <div class="pane hidden notes" id="pane-notes"><div class="empty">The AI keeps notes here: topic, decisions, action items and open questions.</div></div>
+      <div class="pane hidden" id="pane-kb"></div>
+      <div class="pane hidden" id="pane-chat"><ul class="lines" id="chat"><li class="empty">No messages yet.</li></ul></div>
+      <form id="chatform" class="hidden" autocomplete="off"><input id="chatin" maxlength="2000" placeholder="Message everyone (the AI reads chat too)"><button>Send</button></form>
+    </aside>
+  </div>
+  <footer id="controls">
+    <button id="mic">Mute</button>
+    <button id="cam">Camera off</button>
+    <button id="ptt" title="Only send your voice while holding Space or this button: for noisy places">Push to talk: off</button>
+    <button id="avatar">Avatar: off</button>
+    <div class="seg" id="modesw" title="Switch the AI for everyone: smart (this app) or plain (answers everything, stops at any sound)">
+      <button data-m="smart" class="on">Smart</button><button data-m="plain">Plain</button>
+    </div>
+    <button id="leave" class="danger">Leave</button>
+  </footer>
+</section>
+<div id="toasts"></div>
+<script type="module" src="/static/room.js"></script>
+</body>
+</html>

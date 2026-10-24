@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meet 2.0</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<main class="page">
+  <h1>Meet 2.0</h1>
+  <p class="sub">A meeting for up to 5 people with an AI participant that listens to everyone, speaks when it should,
+    and steps in when someone gets a fact wrong.</p>
+
+  <section class="card" id="create">
+    <h2>1 · Create a meeting</h2>
+    <label for="preset">Start from</label>
+    <select id="preset"></select>
+    <div class="row">
+      <div class="grow"><label for="title">Title</label><input id="title" maxlength="120"></div>
+      <div style="width:180px"><label for="ai">AI name</label><input id="ai" maxlength="40"></div>
+    </div>
+    <label for="setting">Setting (what kind of meeting this is)</label>
+    <input id="setting" maxlength="300">
+    <label for="facts">Facts the AI should know, one per line (you can also upload documents next)</label>
+    <textarea id="facts" rows="6"></textarea>
+    <label for="agenda">Agenda (optional)</label>
+    <input id="agenda" maxlength="300">
+    <div class="row" style="margin-top:12px">
+      <div>
+        <label>AI appearance</label>
+        <div class="seg" id="avatarseg">
+          <button type="button" data-v="off" class="on">Voice only</button>
+          <button type="button" data-v="live">Live avatar</button>
+        </div>
+        <div class="sub" id="avatarnote"></div>
+      </div>
+      <div style="width:200px"><label for="passcode">Passcode (optional)</label><input id="passcode" maxlength="64" autocomplete="off"></div>
+      <div style="width:200px" id="adminrow" class="hidden"><label for="admin">Admin token</label><input id="admin" autocomplete="off"></div>
+    </div>
+    <div class="row" style="margin-top:18px">
+      <button class="primary" id="go">Create meeting</button>
+      <span class="sub" id="err"></span>
+    </div>
+  </section>
+
+  <section class="card hidden" id="setup" style="margin-top:16px">
+    <h2>2 · Knowledge base</h2>
+    <p class="sub">Give the AI documents to answer from and to check people against. You can add more during the meeting.</p>
+    <div id="kb"></div>
+    <h2 style="margin-top:22px">3 · Invite and join</h2>
+    <div class="row">
+      <input id="link" readonly class="grow">
+      <button id="copy">Copy invite link</button>
+      <button class="primary" id="join">Join meeting</button>
+    </div>
+  </section>
+</main>
+<script type="module">
+import { mountKB } from "/static/kb.js";
+const $ = (id) => document.getElementById(id);
+const cfg = await (await fetch("/api/config")).json();
+const presets = await (await fetch("/api/presets")).json();
+let avatar = cfg.avatar_default === "live" && cfg.livekit ? "live" : "off";
+
+$("preset").innerHTML = presets.map((p, i) => `<option value="${i}">${p.name}</option>`).join("");
+function fill(p) {
+  $("title").value = p.title; $("ai").value = p.ai || cfg.ai_name; $("setting").value = p.setting;
+  $("facts").value = (p.facts || []).join("\n"); $("agenda").value = (p.agenda || []).join(" · ");
+}
+$("preset").onchange = () => fill(presets[+$("preset").value]);
+fill(presets[0]);
+if (cfg.admin_required) $("adminrow").classList.remove("hidden");
+$("admin").value = new URLSearchParams(location.search).get("admin") || "";
+if (cfg.agent === "stub") $("err").textContent = "Running the stub agent (no BOSON_API_KEY on the server).";
+
+function setAvatar(v) {
+  avatar = v;
+  document.querySelectorAll("#avatarseg button").forEach((b) => b.classList.toggle("on", b.dataset.v === v));
+}
+document.querySelectorAll("#avatarseg button").forEach((b) => b.onclick = () => {
+  if (b.dataset.v === "live" && !cfg.livekit) { $("avatarnote").textContent = "Needs LiveKit settings on the server."; return; }
+  setAvatar(b.dataset.v);
+});
+setAvatar(avatar);
+if (!cfg.livekit) $("avatarnote").textContent = "Live avatar: add LiveKit keys to .env to enable.";
+
+$("go").onclick = async () => {
+  $("go").disabled = true; $("err").textContent = "";
+  const body = {
+    title: $("title").value, ai: $("ai").value, setting: $("setting").value, agenda: $("agenda").value,
+    facts: $("facts").value.split("\n").map((s) => s.trim()).filter(Boolean),
+    passcode: $("passcode").value, avatar, admin: $("admin").value,
+  };
+  const r = await fetch("/api/rooms", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const res = await r.json();
+  if (!r.ok) { $("err").textContent = res.detail || "Could not create the meeting."; $("go").disabled = false; return; }
+  try { localStorage.setItem(`host:${res.id}`, res.host_key); } catch {}
+  const link = new URL(res.url, location.href);
+  if (body.passcode) link.searchParams.set("k", body.passcode);
+  $("link").value = link.href;
+  $("create").querySelectorAll("input,textarea,select,button").forEach((e) => e.disabled = true);
+  $("setup").classList.remove("hidden");
+  mountKB($("kb"), res.id, { by: "host" });
+  $("join").onclick = () => location.href = link.href;
+  $("setup").scrollIntoView({ behavior: "smooth" });
+};
+$("copy").onclick = async () => { await navigator.clipboard.writeText($("link").value); $("copy").textContent = "Copied"; };
+</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+# Optional: the live avatar over LiveKit (rooms work voice-only without these).
+livekit==1.1.20
+livekit-api==1.2.2
+livekit-agents==1.8.8

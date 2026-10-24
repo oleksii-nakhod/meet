@@ -1,0 +1,108 @@
+[
+  {
+    "id": "blank", "name": "Blank meeting", "people": 3,
+    "title": "Meeting", "ai": "Higgs", "setting": "online meeting", "agenda": [], "facts": []
+  },
+  {
+    "id": "house", "name": "House meeting: bills and chores", "people": 3,
+    "title": "House meeting", "ai": "Higgs", "setting": "monthly house meeting of three roommates",
+    "cast": ["Alex", "Jordan", "Mei"],
+    "agenda": ["Money", "Chores", "Guests and pets", "Anything else"],
+    "facts": [
+      "Rent is $2,400 a month, split equally ($800 each), due on the 1st to the landlord, Mrs. Okafor.",
+      "Jordan pays the internet bill, $75 a month; Alex and Mei each owe Jordan $25.",
+      "Mei paid the September electricity bill, $186; Alex and Jordan each owe Mei $62.",
+      "Lease section 7: no pets without the landlord's written approval.",
+      "Lease section 9: a guest staying more than 7 nights in a row needs the landlord's notice in advance.",
+      "Trash goes out Monday and Thursday nights; recycling every other Monday, next on October 26.",
+      "Quiet hours are 11 pm to 7 am on weeknights.",
+      "This week's chores: Alex the kitchen, Jordan the bathroom, Mei the floors."
+    ]
+  },
+  {
+    "id": "hackathon", "name": "Hackathon demo planning", "people": 3,
+    "title": "Team sync: demo video", "ai": "Higgs", "setting": "hackathon team meeting",
+    "cast": ["Alex", "Priya", "Sam"],
+    "agenda": ["Status round", "Demo video plan", "Risks", "Who does what"],
+    "facts": [
+      "The demo video must be 2 to 3 minutes and show the project running.",
+      "Submissions close Saturday at 3 pm Eastern; late submissions are not accepted.",
+      "Judging: use of Higgs 30%, user experience 25%, innovation 25%, technical execution 20%.",
+      "Priya records the voice-over, Sam edits the video, Alex runs the live demo.",
+      "The repo must be public and its README must have setup steps."
+    ]
+  },
+  {
+    "id": "launch", "name": "Launch go/no-go (AI named Nova)", "people": 3,
+    "title": "Launch go/no-go", "ai": "Nova", "setting": "product launch go/no-go meeting",
+    "cast": ["Priya", "Sam", "Jordan"],
+    "agenda": ["Metrics vs criteria", "Open bugs", "Rollout and on-call", "Decision"],
+    "facts": [
+      "Launch: Thursday, November 5 at 10 am Pacific.",
+      "Go criteria: crash-free sessions at least 99.5%, p95 API latency under 300 ms, zero open P0 bugs.",
+      "Current numbers: crash-free sessions 99.62%, p95 API latency 340 ms, one open P0.",
+      "The open P0 is PAY-512: refunds in euros are charged twice. Owner: Jordan. The fix is in review.",
+      "Rollout: 5% of users on day 1, 25% on day 2, 100% on day 3.",
+      "A rollback takes about 12 minutes.",
+      "On-call in launch week: Sam primary, Jordan secondary.",
+      "The press embargo lifts at launch time."
+    ]
+  },
+  {
+    "id": "standup", "name": "Standup (AI named Max)", "people": 2,
+    "title": "Daily standup", "ai": "Max", "setting": "engineering standup",
+    "cast": ["Priya", "Sam"],
+    "agenda": ["Yesterday / today / blockers", "Sprint status", "Ticket shuffle"],
+    "facts": [
+      "Release 4.2 code freeze is Wednesday at 5 pm.",
+      "PAY-418 (webhook retries) is 8 points and owned by Dev.",
+      "PAY-430 (CSV export timeout) is 3 points and unassigned.",
+      "Staging is down for maintenance until 2 pm today.",
+      "The sprint ends Friday; 34 of 52 points are done.",
+      "Dev is out sick today."
+    ]
+  },
+  {
+    "id": "trip", "name": "Trip planning (one-to-one)", "people": 1,
+    "title": "Lisbon trip", "ai": "Higgs", "setting": "family trip planning call",
+    "cast": ["Alex"],
+    "agenda": ["Flights", "Hotel and budget", "Day trips", "Packing"],
+    "facts": [
+      "Flight TP 202 to Lisbon leaves Friday, June 12 at 7:40 am from JFK terminal 1 and lands at 7:55 pm Lisbon time.",
+      "In June, New York is 5 hours behind Lisbon.",
+      "The hotel is Casa Azul: 4 nights, check-in from 3 pm, €145 a night.",
+      "Grandma's wheelchair assistance is booked at both airports.",
+      "The budget for the whole trip is $3,000; the flights already cost $1,480.",
+      "Sunday is a day trip to Sintra: the train from Rossio station takes 40 minutes and costs €2.40 each way.",
+      "The return flight is Tuesday, June 16 at 11:30 am."
+    ]
+  },
+  {
+    "id": "study", "name": "Study group: biology exam", "people": 2,
+    "title": "Bio exam study group", "ai": "Higgs", "setting": "study group for a biology exam",
+    "cast": ["Alex", "Mei"],
+    "agenda": ["Logistics", "Quiz round", "Plan the week"],
+    "facts": [
+      "The exam is Thursday at 9 am in room B204 and lasts 90 minutes.",
+      "It covers chapters 4 to 7: cellular respiration, photosynthesis, cell division and genetics.",
+      "Format: 60 multiple-choice questions and 3 short answers; it is worth 30% of the final grade.",
+      "Calculators are not allowed.",
+      "Professor Lin's office hours are Wednesday 2 to 4 pm.",
+      "Mei has the chapter 6 notes; Alex has last year's practice exam."
+    ]
+  },
+  {
+    "id": "interview", "name": "Mock interview (one-to-one)", "people": 1,
+    "title": "Mock interview", "ai": "Higgs",
+    "setting": "mock job interview practice: the AI plays the interviewer for a junior backend engineer role",
+    "cast": ["Alex"],
+    "agenda": ["Warm-up", "Project deep-dive", "Technical question", "Feedback"],
+    "facts": [
+      "The role: junior backend engineer at Lumen Health (Python, Postgres, AWS).",
+      "The real interview is Monday at 11 am: 45 minutes on video.",
+      "Its structure: 10 minutes of intro, 25 minutes technical, 10 minutes for the candidate's questions.",
+      "Alex's main project: a Flask API for the student food bank that served about 400 students a week.",
+      "Alex wants feedback on rambling and on filler words."
+    ]
+  }
+]
