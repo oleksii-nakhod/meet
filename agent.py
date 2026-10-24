@@ -449,6 +449,16 @@ def fix_terms(text, terms, people=(), ai=""):
     return text
 
 
+def overlaps(a, b, share=0.6):
+    """Do two transcripts say mostly the same words: `share` of the shorter one's words (3 or more) in the other?"""
+    wa, wb = re.findall(r"[a-z0-9']+", a.lower()), re.findall(r"[a-z0-9']+", b.lower())
+    short, other = (wa, set(wb)) if len(wa) <= len(wb) else (wb, set(wa))
+    return len(short) >= 3 and sum(w in other for w in short) >= share * len(short)
+
+
+BLEED_S, BLEED_DB = 2.5, 6.0  # a line mostly the same as another person's from this long ago, this much quieter: bleed
+
+
 def trivial(text):
     """Only listener sounds and fillers, however many ("Oh. Oh. Okay. Yes.", "Yeah, yeah, um."), not asked."""
     words = re.findall(r"[a-z][a-z'-]*", text.lower())
@@ -1246,6 +1256,7 @@ class Listener:
         self.line_audio = []     # this line's frames as sent to STT, for the local fallback
         self.since_check, self.checking = 0.0, False  # BARGE: speech since this line was last fact-checked so far
         self.cut = None          # BARGE: the history entry of this line's fragment that Higgs cut in on
+        self.line_db = None      # the median level (dB) of the line being handed to on_line
 
     def _new_session(self):
         tr = {"model": "higgs-stt-3.1", **({"language": LANG} if LANG else {})}
@@ -1368,6 +1379,10 @@ class Listener:
         tok = {"decided": False}  # this piece's own count (pieces of one person overlap: "Nova, what...?" + "Oh.")
         try:
             await self._transcribe_and_decide(t_end, audio, cut, tok)
+        except Exception:  # noqa: BLE001  (a line lost to a bug says so in the room log)
+            import traceback
+            self.b.a.room.log({"type": "agent_error", "where": "line", "slot": self.slot,
+                               "error": traceback.format_exc()[-1500:]})
         finally:
             if not tok["decided"]:
                 self.in_flight = max(0, self.in_flight - 1)
@@ -1429,6 +1444,9 @@ class Listener:
                                    "wait_s": round(time.perf_counter() - t0, 2)})
                 text = fixed
         self.t_transcript = time.perf_counter()
+        lv = [frame_db(f) for f in audio]
+        lv = sorted(x for x in lv if x > -55)
+        self.line_db = lv[len(lv) // 2] if len(lv) >= 10 else None  # how loud this line was on their mic (bleed check)
         if text:
             merge, self.merge = self.merge, False
             await self.b.on_line(self, text, t_end, merge, cut, tok)
@@ -1532,7 +1550,7 @@ class ImprovedBrain:
         self.last_out = np.zeros(N, np.int16)
         self.gain = 1.0
         self.last_listener = None
-        self.recent = deque(maxlen=12)  # (time, slot, text): echo guard
+        self.recent = deque(maxlen=12)  # {t, slot, text, db, entry, line} of recent lines: the bleed guard (on_line)
         self.lab_t = 0.0
         self.voice_at = 0.0       # perf_counter when anyone last made a sound
         self.line_by = {}         # line id -> slot of who said it
@@ -1707,9 +1725,31 @@ class ImprovedBrain:
         a = self.a
         if not re.search(r"[A-Za-z]", text):
             return  # "...", or a hum transcribed in another script ("嗯。")
-        if any(time.time() - t0 < 2.0 and slot != li.slot and repeats(text, [x]) for t0, slot, x in self.recent):
-            return  # someone's mic picked up another participant (no headphones): ignore the echo
-        self.recent.append((time.time(), li.slot, text))
+        db = li.line_db
+        li.line_db = None
+        # Two people in one room (no headphones): one's mic hears the other's line too, quieter, and STT may write it a
+        # bit differently ("Hi everyone!" / "Hi everyone! Hi Higgs, can you hear us?", 2026-10-23). Whichever copy is
+        # transcribed first, the louder one is who said it.
+        now = time.time()
+        for rec in self.recent:
+            if rec["slot"] == li.slot or now - rec["t"] >= BLEED_S:
+                continue
+            same = now - rec["t"] < 2.0 and repeats(text, [rec["text"]])
+            if not (same or overlaps(text, rec["text"])):
+                continue
+            louder = db is not None and rec["db"] is not None and db > rec["db"] + BLEED_DB
+            quieter = db is not None and rec["db"] is not None and db < rec["db"] - BLEED_DB
+            if louder:
+                a.room.log({"type": "bleed", "slot": rec["slot"], "text": rec["text"][:80], "why": "louder here",
+                            "to": li.name, "db": [round(rec["db"], 1), round(db, 1)]})
+                self._reattribute(rec, li)
+                return
+            if quieter or (same and not louder):
+                a.room.log({"type": "bleed", "slot": li.slot, "text": text[:80], "why": "quieter" if quieter else "same words",
+                            "db": None if db is None else round(db, 1)})
+                return
+        rec = {"t": now, "slot": li.slot, "text": text, "db": db, "entry": None, "line": None}
+        self.recent.append(rec)
         merged = merge and bool(a.history) and a.history[-1]["speaker"] == li.name
         if merged and cut is None:
             tail, tail_kind = prefilter(text, a.ai, [], a.names())
@@ -1753,7 +1793,7 @@ class ImprovedBrain:
             context, cur, merged = a.history[:cut_i] + a.history[cut_i + 1:], cut, True
         else:
             context = list(a.history)
-            cur = {"speaker": li.name, "text": text}
+            cur = rec["entry"] = {"speaker": li.name, "text": text}
             a.history.append(cur)
         if kind:  # "mm-hm", "um", "so the, uh,": part of the meeting, but nothing to answer, and it doesn't make a reply
             if kind != "unfinished":  # someone else is waiting for stale; an unfinished line merges with what follows
@@ -1766,7 +1806,7 @@ class ImprovedBrain:
             await a.line(li.slot, li.name, text, {"speak": False, "why": kind, "decided_s": 0.0}, merged)
             return
         self.line_no += 1
-        line_id = self.line_no
+        line_id = rec["line"] = self.line_no
         self.line_by[line_id] = li.slot
         self.last_listener = li
         r = {**self.point(), "meeting": a.room.id, "line": line_id, "context_turns": context, "current_turn": cur}
@@ -2152,6 +2192,17 @@ class ImprovedBrain:
             await asyncio.sleep(0.02)
         return no("slow")
 
+    def _reattribute(self, rec, li):
+        """A line taken as said by rec's person was li's, heard on rec's mic too (bleed): it's li's line from now on."""
+        if rec["entry"] is not None and rec["entry"].get("speaker") != self.a.ai:
+            rec["entry"]["speaker"] = li.name
+        if rec["line"] is not None:
+            self.line_by[rec["line"]] = li.slot
+        for r in (self.pending, self.playing):
+            if r is not None and r.line_id == rec["line"]:
+                r.listener = li
+        rec["slot"], rec["db"] = li.slot, None
+
     def _drop_paused(self):
         if self.paused is not None:
             self.paused["r"].speaker.cancel()
@@ -2372,6 +2423,7 @@ class HiggsAgent:
         if isinstance(self.brain, ImprovedBrain):
             li = next((x for x in self.brain.listeners.values() if x.name == name), None)
             if li:
+                li.line_db = None  # typed: no level
                 asyncio.ensure_future(self.brain.on_line(li, text, time.perf_counter(), False))
         elif isinstance(self.brain, DefaultBrain):
             asyncio.ensure_future(self.brain.engine.session.say_text(f"{name}: {text}"))

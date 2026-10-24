@@ -276,6 +276,10 @@ SCENARIOS9 = [  # edges from the 2026-10-23 calls (out/rooms): trailing "Oh.", r
     dict(name="long_bc", people=["Alex"], steps=[
         ("talk_over", "Alex", LONG_Q, ("Alex", "Yeah, yeah, uh-huh, yeah."), "continue", {"at": 2.0}),
         ("talk_over", "Alex", "Higgs, what's the riskiest part of our plan?", ("Alex", "Exactly. Yeah. Exactly."), "continue")]),
+    dict(name="same_room", people=["Alex", "Priya", "Sam"], steps=[  # Priya's laptop hears Alex, 14 dB down
+        ("say", "Alex", "Hi everyone. Higgs, can you hear us okay?", "reply", {"bleed": ("Priya", -14.0)}),
+        ("say", "Alex", "Priya, can you share your screen?", "silent", {"bleed": ("Priya", -14.0)}),
+        ("say", "Sam", "Higgs, when do submissions close?", "reply")]),
     dict(name="long_bc_group", people=["Alex", "Priya"], steps=[
         ("talk_over", "Alex", LONG_Q, ("Priya", "Mm-hm, mm-hm, yeah, right."), "continue", {"at": 2.0}),
         ("talk_over", "Priya", "Higgs, what should the last thirty seconds show?",
@@ -434,6 +438,9 @@ async def run_step(step, bots_, ear, mode):
         if getattr(b, "gain_db", 0.0):  # a quiet (or hot) microphone
             pcm = np.clip(pcm.astype(np.float32) * 10 ** (b.gain_db / 20), -32768, 32767).astype(np.int16)
         t_start = b.now()
+        if "bleed" in opts:  # two people in one room: someone else's mic hears it too, quieter
+            w2, db = opts["bleed"]
+            bots_[w2].say(np.clip(pcm.astype(np.float32) * 10 ** (db / 20), -32768, 32767).astype(np.int16))
         t_end = await b.say(pcm)
         if "then_cue" in opts:  # someone makes a short sound while the reply is being prepared
             w2, sp2, delay = opts["then_cue"]
