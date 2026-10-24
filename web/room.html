@@ -31,6 +31,9 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
 #jcast button { padding: 6px 14px; }
 #jcast button.cur { border-color: var(--accent); color: var(--accent); }
 #jerr { color: var(--danger); font-size: 14px; min-height: 1.4em; margin-top: 8px; }
+a.brand { color: inherit; text-decoration: none; }
+#jhome { display: block; text-align: center; margin-top: 10px; padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--chip); color: var(--ink); text-decoration: none; }
+#jhome:hover { border-color: var(--muted); }
 
 /* call */
 #call { height: 100dvh; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
@@ -167,7 +170,7 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
 <body>
 <section id="join">
   <div class="card">
-    <div class="brand">Meet <span>+ Higgs</span></div>
+    <a class="brand" href="/" title="Home: join or create a room">Meet <span>+ Higgs</span></a>
     <h1 id="jtitle">Joining…</h1>
     <div class="sub" id="jsub"></div>
     <div id="jform" class="hidden">
@@ -178,6 +181,7 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
       <div class="hint">Use headphones: the call doesn't cancel your speakers' echo perfectly, and the AI listens too.</div>
     </div>
     <div id="jerr"></div>
+    <a id="jhome" class="hidden" href="/">Back to home</a>
   </div>
 </section>
 

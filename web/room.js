@@ -41,7 +41,11 @@ function toast(text, cls = "") {
 // ---------- join screen ----------
 async function init() {
   const r = await fetch(`/api/rooms/${encodeURIComponent(RID)}`);
-  if (!r.ok) { $("jtitle").textContent = "Room not found"; $("jsub").textContent = "Check the link, or ask for a new one."; return; }
+  if (!r.ok) {
+    $("jtitle").textContent = "Room not found"; $("jsub").textContent = "Check the link, or ask for a new one.";
+    $("jhome").classList.remove("hidden");
+    return;
+  }
   info = await r.json();
   aiName = info.ai;
   document.title = `${info.title} · Meet`;
@@ -711,6 +715,7 @@ function leaveCall(msg) {
   stopMedia();
   $("call").classList.add("hidden"); $("join").classList.remove("hidden");
   $("jerr").textContent = msg; $("jgo").disabled = false; $("jgo").textContent = "Rejoin";
+  $("jhome").classList.remove("hidden");
 }
 
 // Release the mic and camera (the browser's in-use indicator goes off); Rejoin asks for them again.
@@ -722,4 +727,4 @@ function stopMedia() {
   stream = ctx = mixer = micNode = camVideo = null;
 }
 
-init().catch((e) => { $("jtitle").textContent = "Couldn't load the room"; $("jerr").textContent = e.message; });
+init().catch((e) => { $("jtitle").textContent = "Couldn't load the room"; $("jerr").textContent = e.message; $("jhome").classList.remove("hidden"); });
