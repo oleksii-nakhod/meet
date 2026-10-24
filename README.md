@@ -240,7 +240,7 @@ silence rules), `MEET_VOICE`, `MEET_STT_FALLBACK=0` (no local transcription when
 server also prints it. Rooms live in memory; each room logs to `out/rooms/<id>.jsonl`. `/r/<id>?lab` shows the
 agent's turn-taking values on the tiles.
 
-**Meeting scripts** (`web/agendas.js`): the create page offers 9 presets (hackathon planning, the default-vs-improved
+**Meeting scripts** (`web/agendas.js`): the create page offers 10 presets (hackathon planning, meeting memory, the default-vs-improved
 video beats, a house meeting, a launch go/no-go with an AI named Nova, a fast standup with Max, trip planning and a mock
 interview one-to-one, a study group, edge cases). A preset fills the form (facts + the agenda) and gives the call a
 script: who says what, pauses, lines said over the AI, typed lines, and what the AI should do (answer, stay quiet,
