@@ -87,10 +87,17 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
     interruption.
   - **Speaking:** a Realtime session reads the finished draft aloud in the same preset voice, face on or off
     (`MEET_SPEECH`, default `realtime`); TTS 3 takes over if Realtime hasn't started within 2 s. When the line looks
-    like it wants a reply, reading starts as soon as the draft is complete and passes the checks, while the judge is
-    still deciding (`MEET_EARLY_READ`; a "no" cancels it and its session goes back to the pool of 2). A/B against the
-    previous code, both at once (12 scenes, 2026-10-24): first audio 1.92 → 1.51 s after the speech ends (median),
-    p90 3.94 → 2.42 s; 41/41 vs 40/41. `MEET_SPEECH=tts`
+    like it wants a reply (one-to-one, the AI's name, a question) it is answered in **one hop** (`MEET_ONEHOP`,
+    2026-10-24): the conversation goes straight to a voice session with the writer's instructions (a
+    `session.update` on the room's pool of 3 voice sessions, ~20 ms, no new voice check), so there's no second
+    request to read a text draft aloud (first audio ~0.49 s after asking instead of ~0.90 s, `tests/onehop_bench.py`).
+    Its transcript streams in with the speech; it may play once the judge says speak and its first sentence passes
+    the checks (not its own label, not the speaker's words, no refusal or volunteering), else the text draft written
+    alongside is read as before (`hop_fallback` in the room log, with why: no free voice session, slow, a check).
+    A/B, same code, both at once (12 scenes): 41/41 each, reply heard median 2.42 → 1.82 s, p90 4.09 → 3.67 s;
+    `tests/writer_cases.py --versions v2 hop`: the same facts, corrections and summaries. `MEET_ONEHOP=0`: write,
+    then read, with reading started as soon as the draft is complete and passes the checks, while the judge still
+    decides (`MEET_EARLY_READ`; vs the code before: first audio 1.92 → 1.51 s, p90 3.94 → 2.42 s). `MEET_SPEECH=tts`
     goes back to TTS 3 sentence by sentence, which starts on the draft's first sentence: without the face, replies
     were heard ~0.2–0.3 s sooner that way (`./run.sh check`, 2026-10-23: ~1.3–1.4 s vs ~1.6–1.7 s after the line).
   - **Taking the floor:** a reply starts only when the room has been quiet for 0.35 s and nobody who just spoke
@@ -237,7 +244,7 @@ Env: `MEET_SAMPLES` (judge samples per line; default 1 in a one-to-one call, 3 w
 silence rules), `MEET_VOICE` (preset voice, default `chloe`), `MEET_SPEECH` (`realtime` or `tts`, see Speaking),
 `MEET_STT_FALLBACK=0` (no local transcription when Higgs STT fails: on 2026-10-23 it answered most lines with "the transcription is not available right now" after ~3 s, so faster-whisper base.en transcribes a line Higgs hasn't within `MEET_STT_WAIT` = 1.0 s; logged as `stt_fallback`). 2026-10-24:
 `MEET_NAME_CHECK=0` (no local second opinion on the AI's name), `MEET_NAME_WAIT` (0.8), `MEET_WORDS` (word list,
-`/usr/share/dict/words`), `MEET_EARLY_READ=0`, `MEET_RESUME=0` (a reply stopped by a "mm-hm" stays stopped).
+`/usr/share/dict/words`), `MEET_ONEHOP=0`, `MEET_EARLY_READ=0`, `MEET_RESUME=0` (a reply stopped by a "mm-hm" stays stopped).
 
 ## Running it for real (2026-10-23 notes)
 
