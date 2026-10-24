@@ -14,7 +14,7 @@ import secrets
 import sys
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -63,9 +63,23 @@ def room_info(rid: str):
             "people": len(room.humans), "max": 5, "agenda": room.agenda}
 
 
+@app.middleware("http")
+async def revalidate(request: Request, call_next):
+    """Pages and scripts are checked with the server on every load. Behind Cloudflare (public.sh) they were cached for
+    4 hours, so after a restart pages ran the old room.js against the new server (2026-10-23: no live face)."""
+    r = await call_next(request)
+    p = request.url.path
+    if p == "/" or p.endswith((".js", ".html", ".css")):
+        r.headers.setdefault("Cache-Control", "no-cache")
+    return r
+
+
 @app.get("/r/{rid}")
 def room_page(rid: str):
-    return FileResponse(os.path.join(WEB, "room.html"), headers={"Cache-Control": "no-store"})
+    html = open(os.path.join(WEB, "room.html")).read()
+    for js in ("agendas.js", "room.js"):  # a changed file gets a new URL, so no cache can hand out the old one
+        html = html.replace(f'src="/{js}"', f'src="/{js}?v={int(os.path.getmtime(os.path.join(WEB, js)))}"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 @app.websocket("/ws/room")
