@@ -850,6 +850,24 @@ class Pool:
         self.opens = 0
         for _ in range(size):
             self._refill()
+        self.keeper = asyncio.ensure_future(self._keep())
+
+    async def _keep(self):
+        """Replace idle sessions before they age out (MAX_AGE) or after Higgs closed them: a request that found only
+        old ones opened a new session first (0.3-0.6 s, more for a voice), so the first reply after a quiet few
+        minutes was slow."""
+        while not self.closed:
+            await asyncio.sleep(30)
+            for _ in range(self.q.qsize()):
+                try:
+                    s = self.q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if s.close_code is None and time.perf_counter() - s.opened_at < self.MAX_AGE - 70:
+                    self.q.put_nowait(s)
+                else:
+                    asyncio.ensure_future(close(s))
+                    self._refill()
 
     def _new(self):
         self.opens += 1
@@ -1021,6 +1039,7 @@ class Pool:
 
     async def close(self):
         self.closed = True
+        self.keeper.cancel()
         while not self.q.empty():
             await close(self.q.get_nowait())
 
@@ -2184,12 +2203,19 @@ class ImprovedBrain:
                 return no("label")  # it said its own label aloud ("Higgs: ..."): the text draft can drop it, speech can't
             t = sp.text.strip().strip('"')
             head = first_sentence(t, complete_only=True)
-            if head is None and len(re.findall(r"[A-Za-z0-9']+", t)) >= HOP_WORDS:
-                head = t  # a long first sentence: enough words to check (an echo is 6 in a row, a label the first)
+            n = len(re.findall(r"[A-Za-z0-9']+", t))
+            if head is None and (n >= HOP_WORDS or (n >= 4 and len(r.audio) >= 2 * SR)):
+                # a long first sentence: enough words to check (an echo is 6 in a row, a label the first); its
+                # transcript trails its speech (2.35 s of audio had come with 7 words), so a second of speech will do
+                head = t
             if sp.finished or (head is not None and r.audio):
                 r.marks["first"] = time.perf_counter()
                 return (t if sp.finished else head) or None
             await asyncio.sleep(0.02)
+        t = sp.text.strip().strip('"')
+        if r.audio and len(re.findall(r"[A-Za-z0-9']+", t)) >= 3 and not sp.failed:
+            r.marks["first"] = time.perf_counter()
+            return t  # it is talking, its transcript is just behind: better than starting over with the draft
         return no("slow")
 
     def _reattribute(self, rec, li):
