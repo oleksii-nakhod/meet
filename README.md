@@ -53,7 +53,11 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
   - **Hearing:** each person has their own transcription session (`language: en` hint), so names are known. Sessions
     reconnect on their own: Higgs closes a Realtime session after 5 minutes without speech, and opens can fail
     under load. Higgs's own voice leaking back through someone's speakers (more than 25 dB below what it is playing)
-    is ignored, so it neither interrupts Higgs nor becomes a line.
+    is ignored, so it neither interrupts Higgs nor becomes a line. So is a background voice on someone's mic (a TV,
+    a roommate): the person at the mic is the loudest voice on it, so each person's speaking level is learned from
+    their own speech and anything more than 15 dB below it is not them (`MEET_VOICE_GATE_DB`, 0 = off). With a
+    nonstop voice 20 dB down on Alex's mic (`tests/scenarios.py --only tv_1to1`): 4 lines heard and 5/5 steps right,
+    against 22 lines (mostly the TV, glued onto Alex's questions) and 3/5 without it.
   - **Line end:** a line ends after 0.30 s of silence when the per-person turn-taking model (VAP) agrees the person
     is done; mid-thought pauses get held. If the person goes on, the pieces merge into one line (the transcript
     panel replaces the fragment).

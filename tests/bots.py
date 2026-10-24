@@ -78,6 +78,7 @@ class Bot:
         self.pid = secrets.token_hex(6)
         self.noise = 32768 * 10 ** (noise_db / 20)
         self.echo = echo                 # >0: this bot's mic picks up Higgs's voice at this gain (leaky AEC)
+        self.background, self.bg_pos = None, 0  # int16 speech this mic also picks up, looped (a TV, a roommate)
         self.queue = []                  # [ [pcm, pos, future] ]
         self.events = []                 # (t, msg)
         self.ai_frames = []              # (t, rms) of slot-0 frames
@@ -139,6 +140,10 @@ class Bot:
             if self.echo and len(self.ai_tail) >= N:
                 frame = frame + (self.ai_tail[:N].astype(np.float32) * self.echo).astype(np.int32)
                 self.ai_tail = self.ai_tail[N:]
+            if self.background is not None:
+                bg = np.take(self.background, np.arange(self.bg_pos, self.bg_pos + N), mode="wrap")
+                self.bg_pos = (self.bg_pos + N) % len(self.background)
+                frame = frame + bg.astype(np.int32)
             try:
                 await self.ws.send(np.clip(frame, -32768, 32767).astype(np.int16).tobytes())
             except Exception:  # noqa: BLE001

@@ -104,6 +104,13 @@ SCENARIOS2 = [
     dict(name="echo_leak", people=["Alex", "Priya"], echo={"Alex": 0.03, "Priya": 0.03}, steps=[
         ("say", "Alex", LONG_Q, "reply", {"no_stop": True}),
         ("say", "Priya", "Higgs, and what should the last thirty seconds show?", "reply", {"no_stop": True})]),
+    # a TV / roommate on Alex's mic the whole time, 20 dB below Alex: not Alex (the voice gate), so no lines, no replies
+    dict(name="tv_1to1", people=["Alex"], background={"Alex": -20.0}, steps=[
+        ("say", "Alex", "Hey Higgs, can you hear me okay?", "reply"),
+        ("await", "silent", 8.0),
+        ("say", "Alex", "Higgs, when do submissions close?", "reply"),
+        ("await", "silent", 8.0),
+        ("say", "Alex", "Higgs, can you explain in a few sentences how we should structure the demo video?", "reply")]),
     dict(name="soft_barge", people=["Alex", "Priya"], steps=[
         ("talk_over", "Alex", LONG_Q, ("Priya", {"ami": "int_03.wav", "gain_db": -6}), "stop"),
         ("talk_over", "Priya", "Higgs, what's the riskiest part of our plan?", ("Alex", {"ami": "int_07.wav", "gain_db": -6}), "stop")]),
@@ -313,6 +320,15 @@ SCENARIOS = [
         ("say", "Alex", ["Higgs, I was wondering whether", 1.3, "we should show the switch between the two modes."], "reply"),
         ("say", "Priya", ["I think the judges will", 1.0, "want to see it running live."], "silent")]),
 ]
+
+
+def background_speech(gain_db):
+    """B2's TTS meeting lines (tests/data/tts/B2) back to back at gain_db: someone talking nearby the whole time."""
+    import glob
+    from mmhm.higgs import load_wav
+    parts = [load_wav(f) for f in sorted(glob.glob(os.path.join(HERE, "data", "tts", "B2", "*.flac")))]
+    x = np.concatenate([np.concatenate([p, np.zeros(SR // 3, np.int16)]) for p in parts]).astype(np.float32)
+    return (x * 10 ** (gain_db / 20)).astype(np.int16)
 
 
 def speech(spec, voice):
@@ -556,6 +572,8 @@ async def run_scenario(base, sc, mode, outdir):
           for p in people}
     for p, b in bs.items():
         b.gain_db = sc.get("gain", {}).get(p, 0.0)
+        if p in sc.get("background", {}):  # another voice on this mic, nonstop (B2's TTS lines), this many dB down
+            b.background = background_speech(sc["background"][p])
         await b.join()
         await asyncio.sleep(0.2)
     ear = bs[people[0]]  # what one participant hears

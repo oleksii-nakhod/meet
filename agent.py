@@ -467,6 +467,38 @@ def load_fillers():
 
 
 ECHO_DB = float(os.environ.get("MEET_ECHO_DB", "25"))  # quieter than Higgs's output by this much while it talks: echo
+VOICE_GATE_DB = float(os.environ.get("MEET_VOICE_GATE_DB", "15"))  # this far below the person's own voice: not them (0: off)
+
+
+class VoiceGate:
+    """Is a voiced frame the person at this mic, or someone/something farther away (a TV, a roommate, a video)? The
+    person at the mic is the loudest voice on it, so learn their level (90th percentile of the frames that passed, over
+    their last ~60 s of speech) and drop frames more than `gate_db` below it. Only frames that pass are learned from, so
+    minutes of background can't pull the level down to its own; a louder voice raises it at once. Frames are compared by
+    their loudest neighbour (60 ms), so the quiet ends of the person's own words aren't cut."""
+
+    def __init__(self, gate_db=VOICE_GATE_DB, min_frames=25, keep=3000):
+        self.gate_db, self.min_frames = gate_db, min_frames
+        self.hist = deque(maxlen=keep)   # dB of the person's voiced frames that passed
+        self.recent = deque(maxlen=3)    # dB of the last frames, voiced or not
+        self.level = None                # their speaking level (dBFS), None until min_frames of speech
+        self.dropped = 0                 # voiced frames judged to be background
+        self.n = 0                       # frames that passed
+
+    def __call__(self, voiced, db):
+        """voiced: the VAD's verdict for this frame; db: its level. Returns the verdict after the gate."""
+        self.recent.append(db)
+        if not voiced:
+            return False
+        loud = max(self.recent)
+        if self.gate_db > 0 and self.level is not None and loud < self.level - self.gate_db:
+            self.dropped += 1
+            return False
+        self.hist.append(loud)
+        self.n += 1
+        if len(self.hist) >= self.min_frames and (self.level is None or self.n % 10 == 0):  # every 0.2 s of speech
+            self.level = float(np.percentile(self.hist, 90))
+        return True
 
 
 def first_sentence(text, complete_only=False):
@@ -910,6 +942,7 @@ class Listener:
         self.merge = False       # they resumed right after a commit: join the next piece to the last line
         self.signals = None
         self.db, self.echo_frames = -90.0, 0
+        self.voice_gate = VoiceGate()  # background voices on this mic (a TV, a roommate) aren't this person
         self.run, self.quiet = 0.0, 99.0
         self.in_flight = 0       # committed lines not yet transcribed and judged
         self.last_voice = 0.0    # perf_counter of their last voiced frame
@@ -997,6 +1030,7 @@ class Listener:
         if self.speaking and echo_db is not None and self.db < echo_db - ECHO_DB:
             self.speaking = False
             self.echo_frames += 1
+        self.speaking = self.voice_gate(self.speaking, self.db)  # far quieter than their own voice: someone else
         if self.speaking:
             self.last_voice = time.perf_counter()
         # continuous speech (gaps under 0.25 s don't break it): a "mm" is short, taking the floor isn't
@@ -1027,7 +1061,9 @@ class Listener:
                 self.in_flight += 1  # until on_line has decided it (a reply waiting for the floor checks this)
                 self.t_speech_end = time.perf_counter() - self.gate.silence
                 self.commit_info = {"why": self.gate.why, "p_now": None if self.p_now is None else round(self.p_now, 2),
-                                    "lag": self.signals.lag() if self.signals is not None else None}
+                                    "lag": self.signals.lag() if self.signals is not None else None,
+                                    "voice_db": None if self.voice_gate.level is None else round(self.voice_gate.level, 1),
+                                    "background_frames": self.voice_gate.dropped}
                 audio, self.line_audio = self.line_audio, []
                 cut, self.cut, self.since_check = self.cut, None, 0.0
                 if self.open:

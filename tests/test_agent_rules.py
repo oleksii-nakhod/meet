@@ -107,3 +107,34 @@ def test_rule_v5():
     assert rule({"to": "group", "ask": True, "answered": False, "can": True}, r(["Alex", "Priya"], "When's the deadline?"))
     piece = r(["Priya", "Alex"], "Anything else?", [("Higgs", "Rent is due Sunday."), ("Priya", "Higgs. Thanks.")])
     assert rule({"to": "group", "ask": False, "reply": False}, piece)  # the same person just addressed the AI
+
+
+def test_voice_gate_ignores_background_voices():
+    g = agent.VoiceGate(gate_db=15)
+    passed = lambda frames: sum(g(True, db) for db in frames)  # noqa: E731
+    assert passed([-24.0] * 50) == 50 and abs(g.level - (-24.0)) < 0.5   # the person at the mic: their level is learned
+    assert passed([-45.0] * 200) <= 2  # a TV across the room, 21 dB down: ignored (bar 40 ms of their word's tail)
+    assert g.level > -25                                                # and minutes of it don't pull the level down
+    assert passed([-30.0] * 20) == 20                                   # them, a bit quieter: still them
+    # a word's quiet end right after its loud part passes (compared by the loudest of the last 60 ms)
+    assert g(True, -24.0) and g(True, -42.0) and g(True, -42.0)
+    assert not g(True, -42.0) or not g(True, -42.0)                      # ...but not once the loud part is 60 ms back
+    assert not g(False, -20.0)                                           # the VAD's "silence" stays silence
+
+
+def test_voice_gate_when_the_tv_was_first():
+    g = agent.VoiceGate(gate_db=15)
+    for _ in range(100):
+        g(True, -45.0)                       # only the TV so far: nothing to compare with, it passes
+    assert g.level is not None and g.level < -40
+    for _ in range(100):
+        g(True, -22.0)                       # then the person speaks: their louder voice takes over the level
+    assert g.level > -30
+    assert not g(True, -45.0) or not g(True, -45.0) or not g(True, -45.0)  # and the TV is dropped again
+
+
+def test_voice_gate_off():
+    g = agent.VoiceGate(gate_db=0)
+    for _ in range(50):
+        g(True, -20.0)
+    assert g(True, -60.0)
