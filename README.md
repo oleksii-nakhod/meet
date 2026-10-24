@@ -4,7 +4,9 @@ A small video call (2–5 people, joined by link) with an AI participant, Higgs,
 (Realtime, STT, TTS, Avatar). Plain Higgs Realtime answers after every turn and stops at any sound; Meet's "improved"
 Higgs decides *whether* to speak (it stays out of conversations between people, answers questions put to it, corrects
 wrong facts) and *when* (it waits out thinking pauses, keeps talking through a listener's "mm-hm", stops for a real
-interruption). A switch on the call flips between the two so the difference can be heard live.
+interruption). A switch on the call flips between the two so the difference can be heard live. On screen they're
+called **Realtime** (built for one-on-one conversation) and **Meeting** mode; the code and API still say `default`
+and `improved`. Rooms made on the home page start in Meeting mode with the avatar on.
 
 ## junaid3: what changed
 
@@ -242,13 +244,13 @@ silence rules), `MEET_VOICE` (preset voice, default `chloe`), `MEET_SPEECH` (`re
 
 ## Rooms
 
-`/` creates a room (title, AI name, setting, facts, optional passcode) and gives a link `/r/<id>?k=<passcode>`; the
+`/` creates a room (title, setting, facts, optional passcode; the AI is always Higgs) and gives a link `/r/<id>?k=<passcode>`; the
 server also prints it. Rooms live in memory; each room logs to `out/rooms/<id>.jsonl`. `/r/<id>?lab` shows the
 agent's turn-taking values on the tiles.
 
-**Meeting scripts** (`web/agendas.js`): the create page offers 9 presets (hackathon planning, the default-vs-improved
-video beats, a house meeting, a launch go/no-go with an AI named Nova, a fast standup with Max, trip planning and a mock
-interview one-to-one, a study group, edge cases). A preset fills the form (facts + the agenda) and gives the call a
+**Meeting scripts** (`web/agendas.js`): the create page offers 9 presets (hackathon planning, the Realtime-vs-Meeting
+video beats, a house meeting, a launch go/no-go, a fast standup, trip planning and a mock interview one-to-one, a study
+group, edge cases), cast from Junaid, Mahika, Oleksii and Shreya. A preset fills the form (facts + the agenda) and gives the call a
 script: who says what, pauses, lines said over the AI, typed lines, and what the AI should do (answer, stay quiet,
 correct, keep talking, stop) with what a right answer contains. The AI never sees the script. The join screen offers
 the cast's names; the cursor is shared (click a line, ↑/↓ or j/k) and each move is logged as a `script` event, so a

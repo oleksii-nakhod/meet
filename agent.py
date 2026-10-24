@@ -894,7 +894,7 @@ class DefaultBrain:
                 # into the shared history too (who said it is unknown: one mixed stream), so that after a switch
                 # the improved brain knows what was asked ("What did Priya just ask you?" got invented otherwise)
                 self.a.history.append({"speaker": "someone in the room", "text": e["text"].strip()})
-                await self.a.line(None, "the room", e["text"].strip(), {"speak": True, "why": "default Higgs answers every turn"})
+                await self.a.line(None, "the room", e["text"].strip(), {"speak": True, "why": "Realtime answers every turn"})
             elif kind == "respond":
                 spend()
                 t = self.engine.turns.get(e.get("rid"))

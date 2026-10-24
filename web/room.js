@@ -5,7 +5,7 @@ const $ = (id) => document.getElementById(id);
 const RID = decodeURIComponent(location.pathname.split("/").pop());
 const QS = new URLSearchParams(location.search);
 const LAB = QS.has("lab");
-const MODE_LABEL = { default: "default Higgs", improved: "Mm-hm + Third Voice" };
+const MODE_LABEL = { default: "Realtime", improved: "Meeting mode" }; // "default"/"improved" stay the internal names
 const W = (window.meet = { audioRx: {}, videoRx: {}, msgs: {}, errors: [], audioTx: 0, videoTx: 0, videoSkip: 0,
   peak: [], roster: null, slot: null, ai: { mode: "default", avatar: false, status: "listening" }, levels: [], gain0: 1,
   humanGain: 1, avatar: { starts: 0, chunks: 0, played: 0 } });

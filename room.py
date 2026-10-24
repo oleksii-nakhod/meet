@@ -145,7 +145,8 @@ class Human:
 
 
 class Room:
-    def __init__(self, title, ai="Higgs", setting="", facts=(), passcode="", agenda="", mode="default", rid=None):
+    def __init__(self, title, ai="Higgs", setting="", facts=(), passcode="", agenda="", mode="default", rid=None,
+                 avatar=False):
         self.id = rid or secrets.token_urlsafe(8)
         self.passcode = passcode or ""
         # a script from web/agendas.js for the people to read from; the agent never sees it (only the brief), and
@@ -154,7 +155,7 @@ class Room:
         self.brief = {"title": title or "Meeting", "ai": ai or "Higgs", "setting": setting or "",
                       "facts": [f for f in facts if f]}
         self.mode = mode if mode in ("default", "improved") else "default"
-        self.avatar, self.status = False, "listening"
+        self.avatar, self.status = bool(avatar), "listening"  # avatar on from the start: it starts with the first join
         self.humans = {}  # slot -> Human
         self.last_slot = {}  # pid -> slot it had, so a reconnect gets the same tile back
         self.idle_url = None
@@ -349,8 +350,14 @@ class Room:
                 if self.humans and not self._started:
                     self._started = True
                     if self.avatar and self.avatar_livekit:
-                        await self.set_live_avatar(True)
+                        try:
+                            await self.set_live_avatar(True)
+                        except Exception as e:  # Higgs still joins, without the face (it used to not start at all)
+                            self.avatar = False
+                            await self.event({"type": "ai_error", "error": f"live avatar: {e!r}"[:300]})
+                            await self.event(self.ai_state())
                     await self.agent.start()
+                    self._safe(self.agent.set_avatar, self.avatar)  # the rendered face's idle loop, if it's on
                 elif not self.humans and self._started:
                     self._started = False
                     await self.agent.stop()

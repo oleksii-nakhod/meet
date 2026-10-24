@@ -69,10 +69,7 @@ button:disabled { opacity: .5; cursor: default; }
     <label for="preset">Meeting script</label><select id="preset"></select>
     <div class="pinfo" id="pinfo"></div>
     <label for="title">Room title</label><input id="title" value="Team sync" maxlength="120">
-    <div class="row">
-      <div><label for="ai">AI name</label><input id="ai" value="Higgs" maxlength="40"></div>
-      <div><label for="passcode">Passcode (optional)</label><input id="passcode" maxlength="64" autocomplete="off"></div>
-    </div>
+    <label for="passcode">Passcode (optional)</label><input id="passcode" maxlength="64" autocomplete="off">
     <label for="setting">Setting (one line)</label><input id="setting" value="hackathon team meeting" maxlength="300">
     <label for="facts">What the AI knows (one fact per line)</label>
     <textarea id="facts">The demo video must be 2 to 3 minutes and show the project running.
@@ -96,7 +93,7 @@ Submissions close Saturday at 3 pm.</textarea>
     <div class="kb" id="kb"></div>
   </section>
 </main>
-<script src="/agendas.js"></script>
+<script src="/agendas.js?v=2"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const store = (k, v) => { try { if (v === undefined) return sessionStorage.getItem(k); sessionStorage.setItem(k, v); } catch { return null; } };
@@ -115,7 +112,7 @@ const pick = () => {
   const info = $("pinfo");
   info.replaceChildren();
   if (!a) { info.textContent = "Fill in the room yourself; the call won't show a script."; return; }
-  $("title").value = a.title; $("ai").value = a.ai; $("setting").value = a.setting; $("facts").value = agendaFacts(a).join("\n");
+  $("title").value = a.title; $("setting").value = a.setting; $("facts").value = agendaFacts(a).join("\n");
   const lines = a.script.filter((x) => x.say || x.chat).length;
   const cast = document.createElement("b"); cast.textContent = a.cast.join(", ");
   const ol = document.createElement("ol");
@@ -171,7 +168,7 @@ $("create").onclick = async () => {
   try {
     const body = {
       id: $("rid").value.trim(),
-      title: $("title").value.trim(), ai: $("ai").value.trim() || "Higgs", setting: $("setting").value.trim(),
+      title: $("title").value.trim(), setting: $("setting").value.trim(), mode: "improved", avatar: true, // Meeting mode, face on
       facts: $("facts").value.split("\n").map((s) => s.trim()).filter(Boolean), passcode: $("passcode").value.trim(),
       admin: $("admin").value.trim(), agenda: $("preset").value,
     };

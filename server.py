@@ -108,7 +108,8 @@ async def create_room(request: Request):
         facts = facts.split("\n")
     room = Room(str(body.get("title") or "")[:120], str(body.get("ai") or "Higgs")[:40], str(body.get("setting") or "")[:300],
                 [str(f).strip()[:500] for f in facts][:100], str(body.get("passcode") or "")[:64],
-                str(body.get("agenda") or "")[:40], str(body.get("mode") or "default"), rid=rid)
+                str(body.get("agenda") or "")[:40], str(body.get("mode") or "default"), rid=rid,
+                avatar=body.get("avatar") is True)  # the home page sends mode "improved" and avatar true
     for d in room.kb.docs():  # documents stay on disk by room id: a new room doesn't inherit an old one's
         room.kb.delete(d["id"])
     room.kb.set_facts(room.brief["facts"])

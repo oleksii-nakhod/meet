@@ -83,6 +83,33 @@ def test_cap(client, monkeypatch):
     assert client.post("/api/rooms", json={"id": "two"}).status_code == 503
 
 
+def test_mode_and_avatar(client):
+    client.post("/api/rooms", json={"id": "home", "mode": "improved", "avatar": True})  # what the home page sends
+    assert (server.ROOMS["home"].mode, server.ROOMS["home"].avatar) == ("improved", True)
+    client.post("/api/rooms", json={"id": "api"})  # the API's own defaults are unchanged (tests rely on them)
+    assert (server.ROOMS["api"].mode, server.ROOMS["api"].avatar) == ("default", False)
+
+
+def test_failed_avatar_start_still_starts_higgs(client):
+    client.post("/api/rooms", json={"id": "face", "avatar": True})
+    rm = server.ROOMS["face"]
+    rm.avatar_livekit = True
+    started = []
+
+    async def boom(on):
+        raise RuntimeError("429 Too Many Requests")
+
+    async def start():
+        started.append(True)
+    rm.set_live_avatar, rm.agent.start = boom, start
+    with client.websocket_connect("/ws/room?room=face&pid=p1&name=Ann"):
+        for _ in range(100):
+            if started:
+                break
+            time.sleep(0.01)
+    assert started and rm.avatar is False
+
+
 def test_reused_id_starts_with_its_own_documents(client):
     """Documents stay on disk by room ID; a room created later (another server run) with that ID doesn't get them."""
     client.post("/api/rooms", json={"id": "house", "facts": ["Rent is due on the 1st."]})
