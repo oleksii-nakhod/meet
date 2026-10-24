@@ -880,14 +880,17 @@ class Pool:
         minutes was slow."""
         while not self.closed:
             await asyncio.sleep(30)
+            replaced = False
             for _ in range(self.q.qsize()):
                 try:
                     s = self.q.get_nowait()
                 except asyncio.QueueEmpty:
                     break
-                if s.close_code is None and time.perf_counter() - s.opened_at < self.MAX_AGE - 70:
+                old = time.perf_counter() - s.opened_at >= self.MAX_AGE - 70
+                if s.close_code is None and (not old or replaced):
                     self.q.put_nowait(s)
-                else:
+                else:  # one per pass: opened together they age together, and voice sessions opening at once draw
+                    replaced = True  # 429s from the voice check (a mode switch then waited 32 s for its session)
                     asyncio.ensure_future(close(s))
                     self._refill()
 
