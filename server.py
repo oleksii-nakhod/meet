@@ -19,6 +19,9 @@ from fastapi.staticfiles import StaticFiles
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+from meet_config import livekit_configured, load_environment  # noqa: E402
+
+load_environment()  # must happen before room.py imports the Boson client
 from room import Room  # noqa: E402
 
 WEB = os.path.join(HERE, "web")
@@ -45,7 +48,7 @@ async def create_room(request: Request):
         facts = facts.split("\n")
     room = Room(str(body.get("title") or "")[:120], str(body.get("ai") or "Higgs")[:40], str(body.get("setting") or "")[:300],
                 [str(f).strip()[:500] for f in facts][:100], str(body.get("passcode") or "")[:64],
-                str(body.get("agenda") or "")[:40])
+                str(body.get("agenda") or "")[:40], str(body.get("mode") or "default"))
     ROOMS[room.id] = room
     link = f"/r/{room.id}"
     proto = request.headers.get("x-forwarded-proto") or request.url.scheme
@@ -60,7 +63,29 @@ def room_info(rid: str):
     if not room:
         return JSONResponse({"error": "no such room"}, status_code=404)
     return {"id": rid, "title": room.brief["title"], "ai": room.brief["ai"], "passcode": bool(room.passcode),
-            "people": len(room.humans), "max": 5, "agenda": room.agenda}
+            "people": len(room.humans), "max": 5, "agenda": room.agenda, "livekit": room.livekit}
+
+
+@app.post("/api/rooms/{rid}/livekit-token")
+async def livekit_token(rid: str, request: Request):
+    """Mint one short-lived participant token after the normal Meet join succeeds."""
+    room = ROOMS.get(rid)
+    if not room or not room.livekit or not livekit_configured():
+        return JSONResponse({"error": "LiveKit is not available for this room"}, status_code=404)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    pid = str(body.get("pid") or "")[:64]
+    name = str(body.get("name") or "Guest").strip()[:40] or "Guest"
+    supplied = str(body.get("passcode") or "")[:64]
+    if room.passcode and not secrets.compare_digest(supplied, room.passcode):
+        return JSONResponse({"error": "wrong passcode"}, status_code=403)
+    human = room.by_pid(pid)
+    if not pid or human is None:
+        return JSONResponse({"error": "join the Meet room first"}, status_code=403)
+    from livekit_transport import browser_credentials
+    return browser_credentials(room.livekit_bridge.room_name, pid, name)
 
 
 @app.get("/r/{rid}")

@@ -30,6 +30,29 @@ The models download from Hugging Face on first use. `ffmpeg` is needed only to r
 
 `./run.sh` is `python server.py --port 8600` with the venv's Python.
 
+### LiveKit media and live avatar
+
+When `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` are set, Meet automatically uses LiveKit for
+microphone, camera, participant playback, and the AI's output track. The existing WebSocket remains the control plane
+for roster, chat, transcripts, scripts, and mode switches. Turning **Avatar on** starts a Boson realtime avatar session
+in the same LiveKit room; the avatar publishes synchronized audio and video as the `boson-avatar` participant.
+
+Copy `.env.example` to `.env`, fill in the four credentials, and run normally. With any LiveKit variable missing,
+Meet falls back to its original raw-PCM/JPEG WebSocket media transport and rendered-video avatar.
+
+In **improved** mode, a contradiction confirmed by the existing majority fact checker becomes an active intervention:
+it bypasses the normal wait-for-silence rule, speaks the correction immediately, and broadcasts a temporary human-audio
+gain so every listener ducks other people while Higgs talks. `MEET_PROACTIVE_FACTS=0` disables this behaviour;
+`MEET_FACT_DUCK_GAIN` sets the human playback level during a correction (default `0.18`). Nobody's microphone is muted:
+speech received during the correction remains in that person's utterance buffer, then is transcribed and handled after
+the correction releases the floor.
+
+Improved mode now confirms ordinary interruptions from the transcription. Repeated acknowledgements and filler
+sounds ("umm", "ahh", "okay", "yeah", "mm-hm") keep Higgs speaking at full volume; they neither cancel playback nor
+replace a pending answer. A substantive utterance or explicit "stop talking" can interrupt an ordinary reply once
+its words have been transcribed. That adds the clause-ending pause and STT delay to a genuine interruption, but
+does not depend on the optional local turn-taking models. Fact corrections retain their protected floor.
+
 ## Layout
 
 - `server.py`, `room.py`: the call: rooms, the WebSocket audio/video relay, the agent interface. `web/`: the browser
@@ -69,10 +92,10 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
     request after 0.5 s; an interrupted turn is marked `[interrupted]` in the history so the next reply answers the
     interruption.
   - **Taking the floor:** a reply starts only when the room has been quiet for 0.35 s and nobody who just spoke
-    still holds the floor. It is dropped if someone spoke after its line, or if it couldn't start within 3.5 s while
-    people kept talking (8 s in a quiet room). Every reply that was decided but not spoken logs `reply_skipped`.
-  - **While Higgs talks:** a listener's "mm-hm" only ducks it. A real interruption stops it, and Higgs remembers
-    only what was heard (`floor.py`, ported from `mmhm/engine.py`; 16 unit tests).
+    still holds the floor. A newer substantive line can replace it; microphone activity and acknowledgements alone
+    no longer expire a directly addressed answer. Unaddressed replies expire after eight seconds.
+  - **While Higgs talks:** listener acknowledgements keep playback at full volume. A transcribed substantive
+    interruption stops an ordinary reply, and Higgs remembers only what was heard.
 - **Avatar** (both modes, off by default; the face is the uncropped Boson docs portrait). Improved: a reply is voiced
   by a Realtime session reading the writer's text (its whole speech exists sooner than with TTS 3: ~1.5 s vs ~2.0 s
   for one sentence, ~2.7 s vs ~5.7 s for three; TTS 3 takes over if Realtime hasn't started within 2 s), Higgs Avatar

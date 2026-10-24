@@ -6,8 +6,8 @@ default  : plain Higgs Realtime as Boson's docs prescribe. It hears the room (ev
 improved : Third Voice decides *whether* to speak (v4b: 3 decomposed judges + 3 fact-checks on each person's
            transcribed line, third_voice.DEC_SYS4), Mm-hm decides *when* (floor.py): a person's line ends when the
            turn-taking model says they are done, a ready reply waits through a thinking pause or an unfinished
-           sentence and is dropped if someone else has spoken since, and while Higgs talks a listener's "mm-hm" only
-           ducks it; a real interruption stops it and Higgs remembers only what was heard.
+           sentence and is dropped if a newer substantive line replaces it. While Higgs talks, transcribed listener
+           acknowledgements keep it playing; a substantive interruption stops an ordinary reply.
 
 The humans hear each other directly (room.py relays their audio); this module only listens and talks.
 Every Higgs request is counted (CALLS); above MEET_BUDGET the agent stops asking and says so in the room log."""
@@ -43,6 +43,8 @@ BUDGET = int(os.environ.get("MEET_BUDGET", "30000"))  # requests per server run 
 LANG = os.environ.get("MEET_LANG", "en")           # transcription language hint ("" = auto: "mm" came back as "嗯")
 SPECULATE = os.environ.get("MEET_SPECULATE", "1") == "1"  # voice likely replies while the judge decides
 PROMPT = os.environ.get("MEET_PROMPT", "v5")       # judge prompt (see judge_prompt)
+PROACTIVE_FACTS = os.environ.get("MEET_PROACTIVE_FACTS", "1") == "1"  # verified contradictions may take the floor
+FACT_DUCK_GAIN = max(0.0, min(1.0, float(os.environ.get("MEET_FACT_DUCK_GAIN", "0.18"))))
 SIGNALS = os.environ.get("MEET_SIGNALS", "1") == "1"  # per-person turn-taking models (about one CPU core each)
 # When Higgs STT fails, a line is transcribed locally instead. 2026-10-23 (hackathon day) Higgs STT answered 5 of 6
 # clean TTS lines with the text "the transcription is not available right now" after exactly ~3.05 s (a healthy
@@ -84,6 +86,9 @@ REPLY_SYS2 = ("You are {ai}, an AI participant with a voice in an online meeting
               "\"Sure, go ahead.\"), and don't go back to it unless asked. You can answer, remind, summarize and "
               "suggest, but you can't do work outside the call, so don't volunteer for tasks. Say what a helpful "
               "teammate would say: one or two short spoken sentences, under 30 words, no lists, no preamble.")
+REPLY_SYS2 += (" Follow the person's latest topic, including general questions outside the meeting. Don't redirect "
+               "them to project planning unless they ask. An old [interrupted] marker does not mean they still want "
+               "you to be quiet: answer the newest request directly.")
 PERSONA = ("You are {ai}, an AI participant with a voice in an online meeting ({setting}) with {people}. "
            "What you know: {facts} Keep each reply to one or two short spoken sentences.")
 
@@ -298,6 +303,13 @@ def backchannel(text):
     return bool(words) and len(words) <= 3 and not t.endswith("?") and all(w in BACKCHANNEL for w in words)
 
 
+def conversational_ack(text):
+    """Listener noises and acknowledgements don't become interruptions just because they are long."""
+    words = re.findall(r"[a-z][a-z'-]*", text.lower())
+    noises = re.compile(r"(?:u+m+|u+h+|a+h+|e+r+m*|h+m+|m+h*m+|uh-huh|mm-hm)")
+    return bool(words) and all(w in BACKCHANNEL or noises.fullmatch(w) for w in words)
+
+
 def fix_name(text, ai, people=()):
     """Higgs STT sometimes mishears the AI's name when it's said to get attention ("Pigs, how should we...",
     "thanks, Hicks.", "Pigs. And what should..."): a word that sounds like it (similar spelling, about as long), as
@@ -507,6 +519,11 @@ def echoes(reply, line, run=6):
 def frame_db(pcm):
     x = pcm.astype(np.float32) / 32768
     return float(20 * np.log10(np.sqrt(np.mean(x * x)) + 1e-9))
+
+
+def probable_echo(pcm, echo_db):
+    """A quiet mic frame under a recent loud AI frame is probably acoustic playback leakage."""
+    return frame_db(pcm) < echo_db - ECHO_DB
 
 
 class Spares:
@@ -790,6 +807,11 @@ class DefaultBrain:
         self.a = agent
         self.engine = Engine(mode="server_vad", instructions=agent.persona(), voice=VOICE)
         self.k = 0  # engine.log entries handled
+        # Browser AEC is imperfect, especially when the LiveKit avatar is played through laptop speakers. Keep a
+        # short tail of Higgs's output level so quiet acoustic copies of that output are not sent back to Higgs as a
+        # brand-new user turn. A nearby real voice is normally far louder and still passes through.
+        self.out_db = deque([-90.0], maxlen=60)
+        self.echo_frames = 0
         # Avatar on: each reply is held until all of it has arrived and its face is rendering, then plays (no
         # "Hmm." filler and no early part, unlike improved: the wait is part of what plain Higgs looks like)
 
@@ -809,11 +831,17 @@ class DefaultBrain:
         mix = np.zeros(N, np.int32)
         for f in frames.values():
             mix += f
-        self.engine.hold_replies = self.a.avatar
+        mic = np.clip(mix, -32768, 32767).astype(np.int16)
+        echo_db = max(self.out_db)
+        if echo_db > -60 and probable_echo(mic, echo_db):
+            mic = np.zeros(N, np.int16)
+            self.echo_frames += 1
+        self.engine.hold_replies = self.a.rendered_avatar
         cur = self.engine.current
-        if cur is not None and cur.hold and not self.a.avatar:  # the avatar was switched off while it waited
+        if cur is not None and cur.hold and not self.a.rendered_avatar:  # the rendered avatar was switched off
             cur.hold = False
-        out = await self.engine.tick(np.clip(mix, -32768, 32767).astype(np.int16))
+        out = await self.engine.tick(mic)
+        self.out_db.append(frame_db(out))
         for e in self.engine.log[self.k:]:
             kind = e["kind"]
             if kind == "user_text" and (e.get("text") or "").strip():
@@ -901,6 +929,7 @@ class Listener:
         self.commit_waiting = None  # a line ended while the session was down: commit it after the backlog
         self.opener = None
         self.line_audio = []     # this line's frames as sent to STT, for the local fallback
+        self.intervention_buffering = False
 
     def _new_session(self):
         tr = {"model": "higgs-stt-3.1", **({"language": LANG} if LANG else {})}
@@ -975,7 +1004,7 @@ class Listener:
         than ECHO_DB below it is Higgs's own voice coming back through their speakers (a leaky echo canceller), not
         them: it neither interrupts Higgs nor becomes a line."""
         self.speaking, self.db = self.vad(pcm)
-        if self.speaking and echo_db is not None and self.db < echo_db - ECHO_DB:
+        if self.speaking and echo_db is not None and probable_echo(pcm, echo_db):
             self.speaking = False
             self.echo_frames += 1
         if self.speaking:
@@ -998,7 +1027,17 @@ class Listener:
             await self._append(pcm)
         else:
             self.preroll.append(pcm)
-        for act in self.gate.update(t, self.speaking, self.p_now):
+        buffering = self.b.intervention_active and self.streaming
+        if buffering != self.intervention_buffering:
+            self.intervention_buffering = buffering
+            await self.b.a.room.event({"type": "user_buffering", "slot": self.slot, "name": self.name,
+                                       "active": buffering})
+        # During a verified correction, keep collecting the user's speech but don't commit it yet. Treat the
+        # buffered line as still open until Higgs finishes; then an ordinary silence closes it and it is understood
+        # in full. This prevents the user's attempted barge-in from spawning a competing reply mid-correction while
+        # still preserving every audio frame they said.
+        gate_speaking = self.speaking or (self.b.intervention_active and self.streaming)
+        for act in self.gate.update(t, gate_speaking, self.p_now):
             if act == "commit" and self.sent >= int(self.p.min_turn / TICK):
                 self.streaming, self.sent = False, 0
                 self.in_flight += 1  # until on_line has decided it (a reply waiting for the floor checks this)
@@ -1084,6 +1123,7 @@ class Reply:
         self.filler = None       # [pcm, pos] of a thinking clip playing while this reply's face renders
         self.filler_done = False
         self.correction = False
+        self.intervention = False  # verified fact correction: take the floor even if the speaker resumed
         self.cancel = False
         self.started = False     # first audio frame sent
         self.marks = {"created": time.perf_counter()}  # when each stage finished (perf_counter), for timing logs
@@ -1157,6 +1197,11 @@ class ImprovedBrain:
             self.reader = Pool(READER, 1, cfg={"output_modalities": ["audio"], "audio": {"output": {"voice": VOICE}}})
         return self.reader
 
+    @property
+    def intervention_active(self):
+        """A verified correction owns the floor; user audio is buffered until it finishes."""
+        return self.playing is not None and self.playing.intervention
+
     def point(self):
         a = self.a
         return {"target_speaker": a.ai, "setting": a.setting, "people": a.names(), "facts": a.facts,
@@ -1186,6 +1231,8 @@ class ImprovedBrain:
         return False  # each listener and pool reconnects on its own
 
     async def stop(self):
+        if self.playing and self.playing.intervention:
+            await self.a.room.event({"type": "human_gain", "gain": 1.0, "reason": "fact_correction_stopped"})
         if self.pools:
             await self.a.room.event({"type": "pool_stats", "opens": {k: p.opens for k, p in self.pools.items()},
                                      "lines": self.line_no})
@@ -1212,9 +1259,8 @@ class ImprovedBrain:
         await self._rebuild_pools()
 
     def on_resume(self, li):
-        """The same person went on right after a commit: a reply to their half-line is stale."""
-        if self.pending and self.pending.listener is li:
-            self._cancel_pending()
+        """Wait for the resumed words before replacing a reply: an 'umm' isn't a new request."""
+        return  # on_line() handles a substantive continuation after STT
 
     def moved_on(self, r):
         """Has the conversation moved past r's line? Any newer line does, except that a question put to the AI by name
@@ -1236,6 +1282,25 @@ class ImprovedBrain:
         a = self.a
         if not re.search(r"[A-Za-z]", text):
             return  # "...", or a hum transcribed in another script ("嗯。")
+        # Check the raw new utterance before merging it with an earlier question. Otherwise 'okay' inherits the
+        # earlier question's meaning and cancels its answer. Acknowledgements are still logged in the transcript.
+        cleaned, interruption_kind = prefilter(text, a.ai, a.history, a.names())
+        last_ai = a.history[-1]["text"] if a.history and a.history[-1]["speaker"] == a.ai else ""
+        accepts_offer = last_ai.rstrip().endswith("?") or bool(OFFER.search(last_ai))
+        if conversational_ack(text) and (self.playing is not None or self.pending is not None
+                                        or not accepts_offer):
+            li.gate.settle()
+            li.barge.reset()
+            await a.line(li.slot, li.name, text, {"speak": False, "why": "listener acknowledgement",
+                                                "decided_s": 0.0})
+            return
+        playing = self.playing
+        if (playing is not None and not playing.intervention
+                and t_end >= playing.marks.get("play_started", float("inf"))
+                and interruption_kind in (None, "stop")):
+            # Energy VAD cannot tell a sustained 'umm' from a request. Only stop after STT confirms useful words.
+            await self._interrupt(playing, li)
+            await a.room.event({"type": "interruption_confirmed", "slot": li.slot, "text": cleaned})
         if any(time.time() - t0 < 2.0 and slot != li.slot and repeats(text, [x]) for t0, slot, x in self.recent):
             return  # someone's mic picked up another participant (no headphones): ignore the echo
         self.recent.append((time.time(), li.slot, text))
@@ -1266,7 +1331,7 @@ class ImprovedBrain:
         addressed = (len(self.listeners) == 1 or re.search(rf"\b{re.escape(a.ai)}\b", text, re.I) is not None
                      or named_ai_before(context, li.name, a.ai))
         reader = self.voice()
-        one = a.avatar and reader is None  # TTS 3 + face: one sentence (its render waits for the whole speech)
+        one = a.rendered_avatar and reader is None  # legacy rendered face waits for the whole TTS response
         if one:  # the face renders only once the whole reply is spoken, and TTS takes about as long as the speech
             convo = "[Answer in one short sentence of at most 12 words.]\n" + convo
         # Likely a reply (a one-to-one call, the AI's name, a question): voice the draft while it streams in and the
@@ -1341,7 +1406,7 @@ class ImprovedBrain:
                                             "briefly.]\n" + convo, retries=1)).strip().strip('"')
             t_draft = time.perf_counter()
         skip = ("no draft (Higgs request failed)" if not ans else "repeat" if repeats(ans, mine)
-                else "someone spoke since" if line_id != self.line_no and not (addressed and not any(
+                else "someone spoke since" if not why.get("wrong") and line_id != self.line_no and not (addressed and not any(
                     self.line_by.get(i) == li.slot for i in range(line_id + 1, self.line_no + 1))) else None)
         if skip:  # the next line's decision sees this one in context
             if spec:
@@ -1357,7 +1422,8 @@ class ImprovedBrain:
         self.pending.vocative = vocative_only(text, a.ai)
         self.pending.addressed = addressed
         self.pending.correction = bool(why.get("wrong"))
-        if a.avatar:  # render ahead, into a buffer: by the time the floor opens the face is (nearly) ready
+        self.pending.intervention = bool(PROACTIVE_FACTS and why.get("wrong"))
+        if a.rendered_avatar:  # render ahead for the legacy /videos/stream avatar
             self.pending.video = False
             self.pending.render = asyncio.ensure_future(self._render(self.pending))
         self.pending.marks.update(gate=getattr(li, "commit_info", None), speech_end=getattr(li, "t_speech_end", t_end), commit=t_end,
@@ -1390,24 +1456,27 @@ class ImprovedBrain:
         if self.playing is None and r is not None and r.closed and (len(r.audio) >= N * 2 * 10
                                                                       or (r.done and len(r.audio) >= N * 2)):
             li = r.listener
-            act, why = self.take.may_play(t, {"p_now": li.p_now, "silence": li.gate.silence}, anyone, r.line_text,
-                                          self.moved_on(r))
-            holder = next((x for x in self.listeners.values() if x is not li and x.gate.silence < FLOOR_POLICY.max_wait
-                           and (x.p_now is None or x.p_now >= FLOOR_POLICY.th_play)), None)
-            if act == "play" and holder is not None and not r.addressed:  # asked by name: a 0.35 s gap will do
-                act, why = "wait", f"{holder.name} may go on"  # someone else just spoke and still holds the floor
-            # someone else spoke after this line and what they said isn't judged yet (it may answer it: "Saturday at
-            # three"): wait for that verdict; a substantive line then makes this reply stale, a "mm-hm" doesn't
-            other = next((x for x in self.listeners.values() if x is not li and (x.in_flight or
-                          (x.gate.speech >= LINE_POLICY.min_turn and x.last_voice > r.t_end))), None)
-            if act == "play" and other is not None and not r.addressed:
-                act, why = "wait", f"{other.name}'s line"
-            if act == "play" and r.vocative and li.gate.silence < VOCATIVE_WAIT:
-                act, why = "wait", "the request may follow"  # "Hey Higgs, [pause] quick one: ..."
-            age = time.perf_counter() - r.t_end
-            stale = STALE_ADDRESSED if r.addressed else STALE_S
-            if act != "drop" and ((age > stale and self.voice_at > r.t_end) or age > STALE_MAX):
-                act, why = "drop", "stale"  # people moved on (or it's very late); a slow reply to a quiet room still plays
+            if r.intervention:
+                act, why = "play", "verified fact correction"
+            else:
+                act, why = self.take.may_play(t, {"p_now": li.p_now, "silence": li.gate.silence}, anyone, r.line_text,
+                                              self.moved_on(r))
+                holder = next((x for x in self.listeners.values() if x is not li and x.gate.silence < FLOOR_POLICY.max_wait
+                               and (x.p_now is None or x.p_now >= FLOOR_POLICY.th_play)), None)
+                if act == "play" and holder is not None and not r.addressed:  # asked by name: a 0.35 s gap will do
+                    act, why = "wait", f"{holder.name} may go on"  # someone else just spoke and still holds the floor
+                # someone else spoke after this line and what they said isn't judged yet (it may answer it)
+                other = next((x for x in self.listeners.values() if x is not li and (x.in_flight or
+                              (x.gate.speech >= LINE_POLICY.min_turn and x.last_voice > r.t_end))), None)
+                if act == "play" and other is not None and not r.addressed:
+                    act, why = "wait", f"{other.name}'s line"
+                if act == "play" and r.vocative and li.gate.silence < VOCATIVE_WAIT:
+                    act, why = "wait", "the request may follow"  # "Hey Higgs, [pause] quick one: ..."
+                age = time.perf_counter() - r.t_end
+                # Background sound and acknowledgements don't make an answer obsolete. New substantive lines are
+                # already handled by moved_on(); only expire an unaddressed reply waiting a long time for the floor.
+                if act != "drop" and not r.addressed and age > STALE_MAX:
+                    act, why = "drop", "stale"
             if act == "play":
                 self.pending, self.playing = None, r
                 r.hist_idx = len(self.a.history)
@@ -1416,7 +1485,10 @@ class ImprovedBrain:
                 for li2 in self.listeners.values():
                     li2.barge.reset()
                 r.play_why = why
-                if self.a.avatar:  # the face has to move with the words: the audio waits for the first video chunk
+                if r.intervention:
+                    await self.a.room.event({"type": "human_gain", "gain": FACT_DUCK_GAIN, "reason": "fact_correction",
+                                             "speaker": li.slot})
+                if self.a.rendered_avatar:  # legacy face: audio waits for the first rendered video chunk
                     if r.render is None:  # the avatar was switched on after this reply was decided
                         r.video = False
                         r.render = asyncio.ensure_future(self._render(r))
@@ -1427,7 +1499,7 @@ class ImprovedBrain:
 
         out = None
         r = self.playing
-        if r is not None and not r.video and not self.a.avatar:
+        if r is not None and not r.video and not self.a.rendered_avatar:
             r.video = True  # the avatar was switched off while this reply waited for its face: just speak
         if r is not None and r.filler is not None:  # the thinking clip, while the reply's face renders
             pcm, pos = r.filler
@@ -1461,6 +1533,7 @@ class ImprovedBrain:
         if r is not None:
             if not r.started:
                 r.started = True
+                r.marks["play_started"] = time.perf_counter()
                 m, now = r.marks, time.perf_counter()
                 t0 = m.get("speech_end", r.t_end)
                 timing = {k: round(m[k] - t0, 2) for k in ("commit", "transcript", "decided", "draft", "created", "audio",
@@ -1468,19 +1541,12 @@ class ImprovedBrain:
                 timing["play"] = round(now - t0, 2)
                 timing["speculated"] = bool(m.get("speculated"))
                 timing["gate"] = m.get("gate")
-                await self.a.status("speaking", after_s=round(now - r.t_end, 2), why=r.play_why, timing=timing)
+                await self.a.status("speaking", after_s=round(now - r.t_end, 2), why=r.play_why, timing=timing,
+                                    intervention=r.intervention)
                 await self.a.room.event({"type": "ai_say", "text": r.text})
-            gains = []
-            for li in self.listeners.values():
-                lag = li.signals.model_lag("p_bcdet") * TICK if li.signals is not None and li.signals.ready.is_set() else 0.0
-                res = li.barge.update(t, li.speaking, li.p_bc, p_now=li.p_now, bc_lag=lag)  # p_bc: the detector's p_bcdet
-                gains.append(res["gain"])
-                if res["event"] == "interrupt":
-                    await self._interrupt(r, li)
-                    return None
-                if res["event"] == "backchannel":
-                    await self.a.room.event({"type": "lab_event", "slot": li.slot, "event": "backchannel"})
-            g = floor.combine(gains) if gains else 1.0
+            # Don't duck or cancel on microphone energy alone. on_line() confirms a genuine interruption from its
+            # transcript; fillers keep full-volume AI playback even when repeated for several seconds.
+            g = 1.0
             if abs(g - self.gain) > 0.05 or (g == 1.0 and self.gain != 1.0):
                 self.gain = g
                 await self.a.room.ai_gain(g)
@@ -1492,6 +1558,8 @@ class ImprovedBrain:
             elif r.done:
                 self.playing = None
                 r.cancel = True  # the words are over: video still rendering (a part's padding) isn't sent
+                if r.intervention:
+                    await self.a.room.event({"type": "human_gain", "gain": 1.0, "reason": "fact_correction_done"})
                 if r.vstarted:
                     await self.a.room.avatar_stop()
                     self.a.room.log({"type": "avatar_reply", "parts": getattr(r, "parts", 0), "voice": ("tts-fallback" if r.speaker.fallback
@@ -1510,6 +1578,8 @@ class ImprovedBrain:
             # marked, so the judge and the writer know it was cut off (unmarked, the writer resumed its old answer)
             self.a.history[r.hist_idx]["text"] = f"{heard} [interrupted]"
         self.playing = None
+        if r.intervention:
+            await self.a.room.event({"type": "human_gain", "gain": 1.0, "reason": "fact_correction_stopped"})
         self.gain = 1.0
         await self.a.room.ai_flush()
         await self.a.room.ai_gain(1.0)
@@ -1619,6 +1689,15 @@ class HiggsAgent:
 
     def names(self):
         return [p["name"] for p in self.room.people()]
+
+    @property
+    def rendered_avatar(self):
+        """True only for the old fMP4 rendering path.
+
+        With LiveKit, Boson's avatar consumes the normal audio output and publishes
+        synchronized tracks itself, so none of the hold/render/filler machinery applies.
+        """
+        return self.avatar and not getattr(self.room, "livekit", False)
 
     def persona(self):
         return PERSONA.format(ai=self.ai, setting=self.setting, people=", ".join(self.names()) or "the group",
@@ -1730,12 +1809,12 @@ class HiggsAgent:
         """Both modes: improved renders ahead (Realtime voice, a "Hmm." filler, long replies in two parts); default
         holds each whole reply until its face renders (DefaultBrain)."""
         self.avatar = bool(on)
-        if self.avatar and AVATAR_FILLER:
+        if self.rendered_avatar and AVATAR_FILLER:
             load_fillers()
-        if self.avatar:
+        if self.rendered_avatar:
             asyncio.ensure_future(self.room.avatar_idle(avatar.IDLE_URL))
-            if isinstance(self.brain, ImprovedBrain):
-                self.brain.voice()
+        if self.avatar and isinstance(self.brain, ImprovedBrain):
+            self.brain.voice()
 
     def _pop(self, slot):
         q = self.inq.get(slot)

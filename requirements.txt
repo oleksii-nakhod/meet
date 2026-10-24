@@ -6,6 +6,9 @@ requests
 websockets
 fastapi
 uvicorn
+aiohttp>=3.11,<4
+certifi
+livekit-agents>=1.8,<2
 torch
 # maai's runtime deps
 einops
