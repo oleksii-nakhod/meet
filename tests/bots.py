@@ -184,6 +184,11 @@ class Bot:
     def ai_speaking(self, within=0.25):
         return bool(self.ai_frames) and self.now() - self.ai_frames[-1][0] < within and self.ai_frames[-1][1] >= AI_RMS
 
+    def ai_audible(self, within=0.3):
+        """Higgs was audible in the last `within` s (unlike ai_speaking, a quiet frame between words doesn't count)."""
+        now = self.now()
+        return any(now - t < within and rms >= AI_RMS for t, rms in self.ai_frames[-int(within / 0.02) - 5:])
+
     def evs(self, typ, since=0.0):
         return [(t, m) for t, m in self.events if t >= since and m.get("type") == typ]
 

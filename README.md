@@ -73,6 +73,15 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
     people kept talking (8 s in a quiet room). Every reply that was decided but not spoken logs `reply_skipped`.
   - **While Higgs talks:** a listener's "mm-hm" only ducks it. A real interruption stops it, and Higgs remembers
     only what was heard (`floor.py`, ported from `mmhm/engine.py`; 16 unit tests).
+  - **Barging in on a wrong fact** (`MEET_BARGE`, on by default): corrections don't wait for the floor. While someone
+    talks, what they've said so far is transcribed locally (faster-whisper) every 0.8 s of speech (`MEET_BARGE_EVERY`)
+    and fact-checked, with the correction drafted alongside; when every check says it contradicts the fact sheet,
+    Higgs cuts in mid-sentence ("Wait, Alex, submissions close Saturday at 3 pm, not Sunday."), about 0.5 s after the
+    check. Any correction then plays over whoever is talking and holds the floor: talking over it doesn't duck or
+    stop it (only 5 s of unbroken speech does, `MEET_HOLD_MAX`). When the cut-in line ends, the whole line replaces
+    its fragment and isn't corrected again. Live (`tests/scenarios.py --set 8`): cut in 3.1–6.0 s before the wrong
+    line ended, kept going for 4.7 s while talked over, and didn't cut in on a long correct line (8 checks, all
+    false); `./run.sh check` unchanged (19/19). `MEET_BARGE=0` restores waiting for a gap and yielding.
 - **Avatar** (both modes, off by default; the face is the uncropped Boson docs portrait). Improved: a reply is voiced
   by a Realtime session reading the writer's text (its whole speech exists sooner than with TTS 3: ~1.5 s vs ~2.0 s
   for one sentence, ~2.7 s vs ~5.7 s for three; TTS 3 takes over if Realtime hasn't started within 2 s), Higgs Avatar

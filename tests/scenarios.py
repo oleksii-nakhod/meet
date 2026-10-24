@@ -179,6 +179,25 @@ SCENARIOS6 = [  # accents (cloned voice-library voices): the same scenes, other 
         ("talk_over", "Alex", LONG_Q, ("Priya", "Mm-hm."), "continue")]),
 ]
 
+# Barging in on a wrong fact (agent.BARGE): Higgs should cut in while the wrong line is still being said, keep its
+# correction going when talked over, and not cut in on a long line that is right. expect "cut_in": Higgs's voice starts
+# before the line ends and its correction isn't stopped.
+SCENARIOS8 = [
+    dict(name="barge_wrong", people=["Alex", "Priya", "Sam"], modes=("improved",), steps=[
+        ("say", "Alex", "So submissions close Sunday at noon, which is great, because it means we have the whole "
+                        "weekend to polish the video, and maybe we can even add a second demo scene with the avatar.",
+         "cut_in"),
+        ("say", "Priya", "Okay, so let's plan the video then.", "any"),
+        ("say", "Sam", "Right, and we have until Saturday at three, so let's record the voice-over on Friday night "
+                       "and then spend Saturday morning on the final edit and the upload.", "silent"),
+        ("talk_over", "Priya", "And the video can be up to five minutes, so let's show everything.",
+         ("Alex", "No, no, hang on, let me finish, I think we really should show everything we built."), "continue",
+         {"at": 0.5})]),
+    dict(name="barge_1to1", people=["Alex"], modes=("improved",), steps=[
+        ("say", "Alex", "Okay so the judging is mostly about innovation, like fifty percent of the score, so I think we "
+                        "should spend all our time on the novel parts and skip the polish.", "cut_in")]),
+]
+
 SCENARIOS7 = [  # the edges of the call
     dict(name="five_people", people=["Alex", "Priya", "Sam", "Jordan", "Mei"], steps=[
         ("say", "Alex", "Okay, everyone's here. Mei, can you start?", "silent"),
@@ -384,6 +403,14 @@ async def run_step(step, bots_, ear, mode):
         on = [o for o in ear.ai_onsets(t_start) if o[0] <= t_end + win]
         cut_in = [o for o in on if o[0] < t_end - 0.1]
         got = "reply" if on else "silent"
+        if expect == "cut_in":  # Higgs should start before the line ends, and not be stopped by them talking on
+            await wait_quiet(ear, 1.0)
+            stopped = any(m.get("stopped") for t, m in ear.evs("ai_state", t_start))
+            got = ("cut in, then stopped" if stopped else "cut in") if cut_in else got
+            row["cut_in_s"] = round(cut_in[0][0] - t_start, 2) if cut_in else None
+            row["line_s"] = round(t_end - t_start, 2)
+            cut_in = []
+            expect = "cut in"
         if on and expect == "reply" and opts.get("no_stop"):  # nobody spoke during the reply: it must not stop
             await wait_quiet(ear, 1.0)
             if any(m.get("stopped") for t, m in ear.evs("ai_state", t_start)):
@@ -436,7 +463,7 @@ async def run_step(step, bots_, ear, mode):
         row["latency"] = round(on - t_end, 2)
         while ear.now() < on + at:
             await asyncio.sleep(0.01)
-        if not ear.ai_speaking(0.3):
+        if not ear.ai_audible(0.3):
             row.update(got="reply too short to talk over", ok=None)
             await wait_quiet(ear, 1.0)
             row.update(window_events(ear, t_start, ear.now()))
@@ -595,6 +622,7 @@ async def main_async(a):
     outdir = os.path.join(MEET, "out", "scen", a.tag)
     os.makedirs(outdir, exist_ok=True)
     pool = {"1": SCENARIOS, "2": SCENARIOS2, "3": SCENARIOS3, "4": SCENARIOS4, "5": SCENARIOS5, "6": SCENARIOS6, "7": SCENARIOS7,
+            "8": SCENARIOS8,
             "all": SCENARIOS + SCENARIOS2}[a.set]
     todo = [(sc, m) for sc in pool if not a.only or sc["name"] in a.only for m in a.modes
             if m in sc.get("modes", ("default", "improved"))]
@@ -649,7 +677,7 @@ def main():
     ap.add_argument("--modes", nargs="+", default=["improved", "default"])
     ap.add_argument("--only", nargs="*")
     ap.add_argument("--servers", type=int, default=0, help="servers to spread the rooms over (default: one per room)")
-    ap.add_argument("--set", default="1", choices=["1", "2", "3", "4", "5", "6", "7", "all"])
+    ap.add_argument("--set", default="1", choices=["1", "2", "3", "4", "5", "6", "7", "8", "all"])
     ap.add_argument("--par", type=int, default=4)
     ap.add_argument("--port", type=int, default=8641)
     ap.add_argument("--samples", type=int, default=0, help="judge samples per line (0: the agent's default)")

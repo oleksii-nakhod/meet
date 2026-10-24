@@ -8,6 +8,8 @@ improved : Third Voice decides *whether* to speak (v4b: 3 decomposed judges + 3 
            turn-taking model says they are done, a ready reply waits through a thinking pause or an unfinished
            sentence and is dropped if someone else has spoken since, and while Higgs talks a listener's "mm-hm" only
            ducks it; a real interruption stops it and Higgs remembers only what was heard.
+           A wrong fact doesn't wait (BARGE): it is fact-checked while still being said, and Higgs cuts in over the
+           speaker and holds the floor until its correction is out.
 
 The humans hear each other directly (room.py relays their audio); this module only listens and talks.
 Every Higgs request is counted (CALLS); above MEET_BUDGET the agent stops asking and says so in the room log."""
@@ -67,6 +69,20 @@ STALE_ADDRESSED = 6.0  # an answer to a question put to the AI by name waits lon
 STALE_MAX = 8.0  # that has passed; in a quiet room it may come later (a slow Higgs request), but not after this
 CORRECT = ("[The latest utterance contradicts what you know. Start by correcting it plainly, as {ai}, not as one of "
            "the people.]\n")
+# Barging in on a wrong fact (2026-10-23): a correction doesn't wait for the floor, it talks over people. While someone
+# talks, what they've said so far is transcribed locally (faster-whisper, as the STT fallback) every BARGE_EVERY s of
+# speech and fact-checked (every check has to agree, as in decide()); on a contradiction Higgs cuts in at once, mid-
+# sentence. Any correction (cut in or after the line) then plays whoever is talking and holds the floor: talking over
+# it doesn't duck it, and only HOLD_POLICY.interrupt_max s of unbroken speech stops it. MEET_BARGE=0: corrections wait
+# for a gap and yield to interruptions like any reply.
+BARGE = os.environ.get("MEET_BARGE", "1") == "1"
+BARGE_EVERY = float(os.environ.get("MEET_BARGE_EVERY", "0.8"))  # speech seconds between fact-checks of a line so far
+BARGE_WORDS = 4  # a line so far needs this many words before it's checked ("So submissions" can't be wrong yet)
+HOLD_POLICY = dataclasses.replace(Policy(), duck_gain=1.0, interrupt_after=99.0, interrupt_total=99.0,
+                                  interrupt_max=float(os.environ.get("MEET_HOLD_MAX", "5.0")))
+CUT_IN = ("[{name} is still talking and may have just said something that contradicts what you know. Cut in now, over "
+          "them: start with \"Sorry, {name},\" or \"Wait,\" and say what is right in one short sentence, as {ai}. Don't "
+          "repeat their wrong words or numbers: they may be misheard.]\n")
 
 REPLY_SYS = ("You are {ai}, an AI participant with a voice in an online meeting ({setting}) with {people}. "
              "What you know: {facts} You decided to speak up after the latest utterance. If the latest utterance "
@@ -887,6 +903,7 @@ class Listener:
         self.b, self.slot, self.name = brain, slot, name
         self.vad, self.p = VAD(), brain.policy
         self.gate, self.barge = floor.LineGate(LINE_POLICY), floor.BargeIn(self.p)
+        self.hold = floor.BargeIn(HOLD_POLICY)  # instead of barge while Higgs corrects someone (BARGE)
         self.speaking, self.p_now, self.p_bc = False, None, None
         # 300 ms of audio before speech is detected goes to STT too (200 ms: "Sam, can you..." came back as "Can you...")
         self.preroll, self.streaming, self.sent = deque(maxlen=15), False, 0
@@ -901,6 +918,8 @@ class Listener:
         self.commit_waiting = None  # a line ended while the session was down: commit it after the backlog
         self.opener = None
         self.line_audio = []     # this line's frames as sent to STT, for the local fallback
+        self.since_check, self.checking = 0.0, False  # BARGE: speech since this line was last fact-checked so far
+        self.cut = None          # BARGE: the history entry of this line's fragment that Higgs cut in on
 
     def _new_session(self):
         tr = {"model": "higgs-stt-3.1", **({"language": LANG} if LANG else {})}
@@ -940,8 +959,8 @@ class Listener:
                     await s.send({"type": "input_audio_buffer.append", "audio": base64.b64encode(f.tobytes()).decode()})
                 self.open = True
                 if self.commit_waiting is not None:
-                    (t_end, audio), self.commit_waiting = self.commit_waiting, None
-                    asyncio.ensure_future(self._transcribe(t_end, audio))
+                    (t_end, audio, cut), self.commit_waiting = self.commit_waiting, None
+                    asyncio.ensure_future(self._transcribe(t_end, audio, cut))
                 return
         self.opener = asyncio.ensure_future(go())
 
@@ -996,6 +1015,10 @@ class Listener:
             self.preroll.clear()
         if self.streaming:
             await self._append(pcm)
+            if BARGE and self.speaking:
+                self.since_check += TICK
+                if self.since_check >= BARGE_EVERY and not self.checking and self.cut is None:
+                    self.b.check_so_far(self)
         else:
             self.preroll.append(pcm)
         for act in self.gate.update(t, self.speaking, self.p_now):
@@ -1006,23 +1029,24 @@ class Listener:
                 self.commit_info = {"why": self.gate.why, "p_now": None if self.p_now is None else round(self.p_now, 2),
                                     "lag": self.signals.lag() if self.signals is not None else None}
                 audio, self.line_audio = self.line_audio, []
+                cut, self.cut, self.since_check = self.cut, None, 0.0
                 if self.open:
-                    asyncio.ensure_future(self._transcribe(time.perf_counter(), audio))
+                    asyncio.ensure_future(self._transcribe(time.perf_counter(), audio, cut))
                 else:
-                    self.commit_waiting = (time.perf_counter(), audio)
+                    self.commit_waiting = (time.perf_counter(), audio, cut)
             elif act == "resume":
                 self.merge = True
                 self.b.on_resume(self)
 
-    async def _transcribe(self, t_end, audio=()):
+    async def _transcribe(self, t_end, audio=(), cut=None):
         self.decided_early = False
         try:
-            await self._transcribe_and_decide(t_end, audio)
+            await self._transcribe_and_decide(t_end, audio, cut)
         finally:
             if not self.decided_early:
                 self.in_flight = max(0, self.in_flight - 1)
 
-    async def _transcribe_and_decide(self, t_end, audio=()):
+    async def _transcribe_and_decide(self, t_end, audio=(), cut=None):
         if not spend():
             return
         s = self.session
@@ -1061,7 +1085,7 @@ class Listener:
         self.t_transcript = time.perf_counter()
         if text:
             merge, self.merge = self.merge, False
-            await self.b.on_line(self, text, t_end, merge)
+            await self.b.on_line(self, text, t_end, merge, cut)
 
 
 class Reply:
@@ -1084,6 +1108,7 @@ class Reply:
         self.filler = None       # [pcm, pos] of a thinking clip playing while this reply's face renders
         self.filler_done = False
         self.correction = False
+        self.barge = False       # a correction cut in while its line was still being said (BARGE)
         self.cancel = False
         self.started = False     # first audio frame sent
         self.marks = {"created": time.perf_counter()}  # when each stage finished (perf_counter), for timing logs
@@ -1232,7 +1257,76 @@ class ImprovedBrain:
             self.pending.speaker.cancel()
             self.pending = None
 
-    async def on_line(self, li, text, t_end, merge):
+    def correcting(self):
+        """A correction is waiting for its audio or being heard: nothing else may cut in."""
+        return any(r is not None and r.correction for r in (self.pending, self.playing))
+
+    def check_so_far(self, li):
+        """BARGE: fact-check what li has said so far of the line they are still saying (from Listener.tick)."""
+        if (not self.a.facts or self.pools is None or LOCAL_STT is None or LOCAL_STT.model is None
+                or not li.line_audio or self.correcting()):
+            return
+        li.since_check, li.checking = 0.0, True
+        asyncio.ensure_future(self._check_so_far(li, li.line_audio, np.concatenate(li.line_audio)))
+
+    async def _check_so_far(self, li, line, pcm):
+        a = self.a
+        try:
+            t0 = time.perf_counter()
+            text = (await asyncio.to_thread(LOCAL_STT.transcribe, pcm)).strip()
+            # a line so far that can't contradict a fact yet: too short, or nothing like a fact (FACTY, the fact sheet)
+            if (len(re.findall(r"[A-Za-z0-9']+", text)) < BARGE_WORDS or li.line_audio is not line
+                    or not (FACTY.search(text) or facts_relevant(text, [], a.facts, [a.ai] + a.names()))):
+                return
+            context = list(a.history)
+            r = {**self.point(), "meeting": a.room.id, "line": self.line_no, "context_turns": context,
+                 "current_turn": {"speaker": li.name, "text": text}}
+            if len(a.facts) > 12:
+                r["facts"] = third_voice.top_facts(r, 8)
+            n = self.samples
+            # the correction is drafted while the checks run (~0.5 s sooner); a line that is right throws it away
+            ctx = "\n".join(f"{t['speaker']}: {t['text']}" for t in context[-14:])
+            ask = (CUT_IN.format(name=li.name, ai=a.ai) +
+                   f"Conversation so far:\n{ctx}\n{li.name}: {text} —\n\nReply as {a.ai}:")
+            draft = asyncio.ensure_future(self.pools["write"].ask(ask, retries=1))
+            got = await asyncio.gather(*[self.pools["check"].ask(third_voice.fact_prompt(r)[1]) for _ in range(n)])
+            hits = [bool(p.get("contradicts")) for p in map(third_voice.parse_json, got) if isinstance(p, dict)]
+            wrong = len(hits) >= n // 2 + 1 and all(hits)
+            a.room.log({"type": "check_so_far", "slot": li.slot, "name": li.name, "text": text, "checks": hits,
+                        "s": round(time.perf_counter() - t0, 2)})
+            # they finished the line meanwhile (it's judged whole), or a correction is already on its way
+            if wrong and li.line_audio is line and li.cut is None and not self.correcting():
+                await self._cut_in(li, text, draft, ask)
+            else:
+                draft.add_done_callback(lambda f: f.exception())
+        finally:
+            li.checking = False
+
+    async def _cut_in(self, li, text, draft, ask):
+        """li is still talking and has said something wrong: write a correction and make it the pending reply, which
+        tick() plays at once, over them. Their line so far joins the history now; when the line ends, the whole line
+        replaces it there (on_line's `cut`)."""
+        a = self.a
+        frag = li.cut = {"speaker": li.name, "text": f"{text} —"}
+        a.history.append(frag)
+        await a.line(li.slot, li.name, frag["text"], {"speak": True, "why": "cuts in: a mistake", "decided_s": 0.0})
+        ans = await hedged(draft, lambda: self.pools["write"].ask(ask), HEDGE_S)
+        ans = re.sub(rf"^\s*{re.escape(a.ai)}\s*:\s*", "", ans.strip().strip('"'), flags=re.I)
+        mine = [h["text"] for h in a.history if h["speaker"] == a.ai][-3:]
+        skip = ("no draft (Higgs request failed)" if not ans else "repeat" if repeats(ans, mine)
+                else "echo" if echoes(ans, text) else "a correction is waiting" if self.correcting() else None)
+        if skip:
+            await a.room.event({"type": "reply_skipped", "line": text[:80], "why": f"cut in: {skip}"})
+            return
+        self._cancel_pending()
+        r = self.pending = Reply(self.line_no, li, text, ans, time.perf_counter(), reader=self.voice())
+        r.correction = r.barge = r.addressed = True
+        if a.avatar:
+            r.video = False
+            r.render = asyncio.ensure_future(self._render(r))
+        await a.status("thinking")
+
+    async def on_line(self, li, text, t_end, merge, cut=None):
         a = self.a
         if not re.search(r"[A-Za-z]", text):
             return  # "...", or a hum transcribed in another script ("嗯。")
@@ -1245,9 +1339,14 @@ class ImprovedBrain:
         text, kind = prefilter(text, a.ai, a.history, a.names())
         if kind == "skip":
             return
-        context = list(a.history)
-        cur = {"speaker": li.name, "text": text}
-        a.history.append(cur)
+        cut_i = next((i for i, h in enumerate(a.history) if h is cut), None) if cut is not None else None
+        if cut_i is not None:  # Higgs cut in on this line: its fragment becomes the whole line, where it was
+            cut["text"] = text
+            context, cur, merged = a.history[:cut_i] + a.history[cut_i + 1:], cut, True
+        else:
+            context = list(a.history)
+            cur = {"speaker": li.name, "text": text}
+            a.history.append(cur)
         if kind:  # "mm-hm", "um", "so the, uh,": part of the meeting, but nothing to answer, and it doesn't make a reply
             if kind != "unfinished":  # someone else is waiting for stale; an unfinished line merges with what follows
                 li.gate.settle()
@@ -1280,6 +1379,8 @@ class ImprovedBrain:
         cdraft = asyncio.ensure_future(pools["write"].ask(CORRECT.format(ai=a.ai) + convo, retries=1)) if a.facts else None
         speak, d = await decide(r, lambda kind, _sys, user, _i: pools[kind].ask(user), samples=self.samples, prompt=PROMPT)
         why = d["reading"]
+        if cut_i is not None and why.get("wrong"):
+            speak, d["why"] = False, "corrected mid-line"  # Higgs already cut in on it
         t_decided = time.perf_counter()
         li.in_flight = max(0, li.in_flight - 1)  # decided: a reply waiting on this line may go (or drop)
         li.decided_early = True
@@ -1340,9 +1441,12 @@ class ImprovedBrain:
             ans = (await writer.ask("[You already said that. Reply to the latest utterance with something new, "
                                             "briefly.]\n" + convo, retries=1)).strip().strip('"')
             t_draft = time.perf_counter()
+        correcting = BARGE and why.get("wrong")  # a correction is said even if people have moved on
         skip = ("no draft (Higgs request failed)" if not ans else "repeat" if repeats(ans, mine)
-                else "someone spoke since" if line_id != self.line_no and not (addressed and not any(
-                    self.line_by.get(i) == li.slot for i in range(line_id + 1, self.line_no + 1))) else None)
+                else "someone spoke since" if not correcting and line_id != self.line_no and not (addressed and not any(
+                    self.line_by.get(i) == li.slot for i in range(line_id + 1, self.line_no + 1)))
+                else "a correction is waiting" if not correcting and self.pending is not None and self.pending.correction
+                and BARGE else None)
         if skip:  # the next line's decision sees this one in context
             if spec:
                 spec.speaker.cancel()
@@ -1408,6 +1512,8 @@ class ImprovedBrain:
             stale = STALE_ADDRESSED if r.addressed else STALE_S
             if act != "drop" and ((age > stale and self.voice_at > r.t_end) or age > STALE_MAX):
                 act, why = "drop", "stale"  # people moved on (or it's very late); a slow reply to a quiet room still plays
+            if BARGE and r.correction:  # a correction doesn't wait for the floor: it talks over whoever is talking
+                act, why = ("drop", "stale") if age > STALE_MAX else ("play", "cut in" if r.barge else "correction")
             if act == "play":
                 self.pending, self.playing = None, r
                 r.hist_idx = len(self.a.history)
@@ -1415,6 +1521,7 @@ class ImprovedBrain:
                 li.gate.settle()  # the reply is out: a later word from them is a new line, not a resume
                 for li2 in self.listeners.values():
                     li2.barge.reset()
+                    li2.hold.reset()
                 r.play_why = why
                 if self.a.avatar:  # the face has to move with the words: the audio waits for the first video chunk
                     if r.render is None:  # the avatar was switched on after this reply was decided
@@ -1444,11 +1551,13 @@ class ImprovedBrain:
         if r is not None and r.filler_done and not r.released and r.filler is None:
             # after "Hmm." people may take the floor (the pause invites it): start the answer only in a 0.35 s gap
             quiet = not anyone and (self.voice_at == 0.0 or time.perf_counter() - self.voice_at >= FLOOR_POLICY.min_silence)
+            quiet = quiet or (BARGE and r.correction)
             if quiet:
                 await self._release(r)
         if r is not None and not r.video:
             taker = next((li for li in self.listeners.values() if li.run >= FLOOR_POLICY.interrupt_max), None)
-            if taker or self.moved_on(r):  # someone took the floor while the face rendered (a "mm" doesn't)
+            # someone took the floor while the face rendered (a "mm" doesn't); a correction keeps it (BARGE)
+            if (taker or self.moved_on(r)) and not (BARGE and r.correction):
                 r.cancel = True
                 r.speaker.cancel()
                 if r.hist_idx == len(self.a.history) - 1:  # never heard: not part of the meeting
@@ -1471,9 +1580,10 @@ class ImprovedBrain:
                 await self.a.status("speaking", after_s=round(now - r.t_end, 2), why=r.play_why, timing=timing)
                 await self.a.room.event({"type": "ai_say", "text": r.text})
             gains = []
+            hold = BARGE and r.correction  # talked over: keep going at full volume (HOLD_POLICY)
             for li in self.listeners.values():
                 lag = li.signals.model_lag("p_bcdet") * TICK if li.signals is not None and li.signals.ready.is_set() else 0.0
-                res = li.barge.update(t, li.speaking, li.p_bc, p_now=li.p_now, bc_lag=lag)  # p_bc: the detector's p_bcdet
+                res = (li.hold if hold else li.barge).update(t, li.speaking, li.p_bc, p_now=li.p_now, bc_lag=lag)  # p_bc: the detector's p_bcdet
                 gains.append(res["gain"])
                 if res["event"] == "interrupt":
                     await self._interrupt(r, li)
