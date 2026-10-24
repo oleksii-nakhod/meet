@@ -585,9 +585,10 @@ async def run_step(step, bots_, ear, mode):
         # Higgs starting to speak (again): a stopped reply's last words before its stop takes effect (the stop comes
         # with the cue's transcript, ~0.8 s after it) are the same span, not a new one
         end = t0 + win
-        on = None
-        while ear.now() < end and on is None:
-            on = next((a for a, _ in ear.ai_onsets(t0 - 5.0) if a > t0 + 0.2), None)
+        while True:  # at least once: the step before may have waited out the whole window (talk_over waits for quiet)
+            on = next((a for a, _ in ear.ai_onsets(t0 - 5.0) if t0 + 0.2 < a <= end), None)
+            if on is not None or ear.now() >= end:
+                break
             await asyncio.sleep(0.05)
         got = "reply" if on else "silent"
         row.update(said="(waiting)", expect=expect, got=got, ok=expect == "any" or got == expect,
