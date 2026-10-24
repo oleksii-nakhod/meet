@@ -23,6 +23,13 @@ interruption). A switch on the call flips between the two so the difference can 
   the end: the corrected person carrying on doesn't stop it, only someone who starts pushing back after the 2 s guard
   does. General-knowledge errors have no document to quote, so they need confidence >= 0.9 and a second, independent
   check agreeing.
+* **Meeting memory.** Replies are written from the last 14 lines, so "what did we decide at the start?" used to get a
+  guess. Beside the conversation, every 8 new lines are folded into short running notes (`meeting_memory.py`:
+  decisions, numbers, who does what, open questions; small talk dropped; changes keep only the latest version), and
+  a reply after the first 14 lines gets the notes plus the recent lines, so its prompt stays the same size however
+  long the meeting runs. Live, 48 lines in: "which room and what budget?" went from a made-up "main conference room"
+  to "room 310, $600" (moved from 204 mid-meeting), at the same speed (0.3 s). The notes survive a mode switch and
+  are in the room log (`"type": "memory"`); `MEET_MEMORY=0` turns it off.
 * **Fast, filler-proof interruptions.** While Higgs talks, a listener's speech is re-transcribed every ~0.3 s on a
   probe session: "umm", "okay", "mm-hm" never stop it; a real interruption does (0.45 s live).
 * **Noise gate** on each person's speech detector (`noise_gate.py`, `MEET_NOISE_GATE`).
@@ -35,7 +42,7 @@ interruption). A switch on the call flips between the two so the difference can 
   cancels all work; the browser recovers from failed avatar connections; `.env` keeps `MEET_*` settings.
 * From `main`: the fixed meeting link (`MEET_ROOM`) and the room-loop timing fix.
 
-Tests: `BOSON_API_KEY=unused python -m pytest tests/test_*.py` (offline, 144 tests);
+Tests: `BOSON_API_KEY=unused python -m pytest tests/test_*.py` (offline, 154 tests);
 `python tests/live_junaid3.py` (7 live scenarios against Boson; `--only l6` for the avatar); `./run.sh check`.
 
 ## Setup

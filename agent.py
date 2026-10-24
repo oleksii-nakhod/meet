@@ -27,6 +27,7 @@ import avatar
 import boson_http
 import fact_monitor
 import floor
+import meeting_memory
 import noise_gate
 import third_voice
 import words
@@ -86,6 +87,7 @@ MIDCHECK = os.environ.get("MEET_MIDCHECK", "1") == "1"
 MIDCHECK_EVERY = float(os.environ.get("MEET_MIDCHECK_EVERY", "1.0"))
 GENERAL_FACTS = os.environ.get("MEET_GENERAL_FACTS", "1") == "1"  # also correct well-established general knowledge
 NOISE_GATE = os.environ.get("MEET_NOISE_GATE", "1") == "1"  # spectral noise gate on each person's speech detector
+MEMORY = os.environ.get("MEET_MEMORY", "1") == "1"  # running notes of the meeting for replies (meeting_memory.py)
 LEX = words.lexicon(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "fillers.en.yaml"))
 DURING = " [said while you were correcting]"
 CALLS = {"n": 0}
@@ -1350,6 +1352,11 @@ class ImprovedBrain:
         self.probe = ProbeSTT(self.models)
         self.insist = {}          # slot -> when they first kept interrupting a correction after its guard
         self.tasks = set()
+        # notes of what was said before the last 14 lines; kept on the agent, so a mode switch doesn't lose them
+        self.memory = None
+        if MEMORY:
+            self.memory = getattr(agent, "memory", None) or meeting_memory.Memory()
+            agent.memory = self.memory
 
     def _spawn(self, coro):
         t = asyncio.ensure_future(coro)
@@ -1500,6 +1507,9 @@ class ImprovedBrain:
         context = list(a.history)
         cur = {"speaker": li.name, "text": text + (DURING if during else "")}  # the writer answers talk-over
         a.history.append(cur)
+        if self.memory is not None and self.memory.due(len(a.history)):  # beside the conversation, never awaited here
+            self._spawn(self.memory.update(self.models, a.history, ai=a.ai, setting=getattr(a, "setting", "a meeting"),
+                                           log=getattr(a.room, "log", None)))
         if kind:  # "mm-hm", "um", "so the, uh,": part of the meeting, but nothing to answer, and it doesn't make a reply
             if kind != "unfinished":  # someone else is waiting for stale; an unfinished line merges with what follows
                 li.gate.settle()
@@ -1513,8 +1523,10 @@ class ImprovedBrain:
         if len(a.facts) > 12:  # big fact sheet: the 8 most relevant facts per line (third_voice.top_facts)
             r["facts"] = third_voice.top_facts(r, 8)
         pools = self.pools
-        ctx = "\n".join(f"{t['speaker']}: {t['text']}" for t in context[-14:])
-        convo = f"Conversation so far:\n{ctx}\n{li.name}: {cur['text']}\n\nReply as {a.ai}:"  # "Your reply:" was continued as a person
+        # longer meetings: the notes of what came before, and the recent lines they don't cover yet (meeting_memory.py)
+        notes, recent = self.memory.context(len(context)) if self.memory is not None else ("", 14)
+        ctx = "\n".join(f"{t['speaker']}: {t['text']}" for t in context[-recent:])
+        convo = f"{notes}Conversation so far:\n{ctx}\n{li.name}: {cur['text']}\n\nReply as {a.ai}:"  # "Your reply:" was continued as a person
         kbase = getattr(a.room, "kb", None)
         src = kbase.search(text + " " + " ".join(t["text"] for t in context[-2:]), k=3) if kbase is not None else []
         if src:  # the meeting's documents: the writer answers from them when they answer the line
