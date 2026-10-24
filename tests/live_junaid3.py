@@ -334,13 +334,82 @@ async def l6(base):
     return sc
 
 
-SCENARIOS = {"l1": l1, "l2": l2, "l3": l3, "l4": l4, "l5": l5, "l6": l6}
+FLAT = ("So I was reading about old navigation, and since the Earth is flat, ships could only sail so far before "
+        "the edge, which is why old maps just stop, and honestly I think that explains a lot about history.")
+DOG = ("So I checked the lease last night and pets are totally allowed without asking anyone, so I'm going to bring "
+       "my dog over next weekend and he can stay here with us for a few weeks, that should be fine.")
+
+
+async def speak_and_watch(speaker, watcher, line, t0):
+    """Say a long line; return (when the correction came, when the speaker finished)."""
+    task = asyncio.ensure_future(speaker.say(tts(line)))
+    t_fix = None
+    while not task.done():
+        await asyncio.sleep(0.05)
+        t_fix = t_fix or watcher.t_of("correction", t0)
+    t_end = task.result()
+    for _ in range(60):
+        t_fix = t_fix or watcher.t_of("correction", t0)
+        if t_fix:
+            break
+        await asyncio.sleep(0.1)
+    return t_fix, t_end
+
+
+async def l7(base):
+    sc = Score("L7 a general-knowledge error is corrected mid-sentence")
+    _, (alex, mei) = await room(base, ["Alex", "Mei"], facts=[])
+    t0 = time.monotonic()
+    t_fix, t_end = await speak_and_watch(alex, mei, FLAT, t0)
+    fix = (mei.ev("correction", t0) or [None])[0]
+    sc.check(fix is not None, "it corrected the flat Earth", fix and fix["text"])
+    sc.check(fix and fix.get("source") == "general knowledge", "source: general knowledge", fix and fix.get("source"))
+    sc.check(t_fix and t_fix < t_end, "it cut in while Alex was still talking",
+             f"{t_end - t_fix:.1f} s before Alex finished" if t_fix and t_fix < t_end else "after Alex finished")
+    await asyncio.sleep(6)
+    ends = [e.get("reason") for e in mei.ev("human_gain", t0) if e["gain"] >= 1]
+    sc.check(ends and ends[0] == "fact_correction_done", "the correction played to the end", ends[:1])
+    await alex.leave()
+    await mei.leave()
+    return sc
+
+
+async def l8(base):
+    sc = Score("L8 a statement contradicting an uploaded document is corrected mid-sentence")
+    r = post(base, "/api/rooms", {"title": "House", "ai": "Higgs", "facts": [], "mode": "improved"})
+    post(base, f"/api/rooms/{r['id']}/kb/sources", {"title": "Lease", "text": LEASE})
+    for _ in range(80):
+        st = get(base, f"/api/rooms/{r['id']}/kb")
+        if st["docs"] and st["docs"][0]["status"] in ("ready", "error"):
+            break
+        await asyncio.sleep(0.5)
+    alex, mei = Bot(base, r["id"], "Alex"), Bot(base, r["id"], "Mei")
+    await alex.join()
+    await mei.join()
+    await alex.ws.send(json.dumps({"type": "set_mode", "mode": "improved"}))
+    await asyncio.sleep(4)
+    t0 = time.monotonic()
+    t_fix, t_end = await speak_and_watch(mei, alex, DOG, t0)
+    fix = (alex.ev("correction", t0) or [None])[0]
+    sc.check(fix is not None, "it corrected the pets claim", fix and fix["text"])
+    sc.check(fix and "lease" in str(fix.get("source", "")).lower(), "source: the lease", fix and fix.get("source"))
+    sc.check(t_fix and t_fix < t_end, "it cut in while Mei was still talking",
+             f"{t_end - t_fix:.1f} s before Mei finished" if t_fix and t_fix < t_end else "after Mei finished")
+    await asyncio.sleep(6)
+    ends = [e.get("reason") for e in alex.ev("human_gain", t0) if e["gain"] >= 1]
+    sc.check(ends and ends[0] == "fact_correction_done", "the correction played to the end", ends[:1])
+    await alex.leave()
+    await mei.leave()
+    return sc
+
+
+SCENARIOS = {"l1": l1, "l2": l2, "l3": l3, "l4": l4, "l5": l5, "l6": l6, "l7": l7, "l8": l8}
 LINES = ["Higgs, how exactly are the rent and the internet bill split between the three of us?", *FILLERS,
          "Wait, what about the internet bill?", "Okay so rent is due on the fifteenth, so I'll transfer my eight hundred then.",
          "Hmm, are you sure about that?", "Just so everyone knows, the plumber is coming on Friday morning at nine.",
          "Right, and since the plumber is coming on Monday, I'll stay home on Monday.",
          "Higgs, what does the lease say about having a dog?", "Hey Higgs, when is the rent due, and who do we pay it to?",
-         "Higgs, what nights does the trash go out?"]
+         "Higgs, what nights does the trash go out?", FLAT, DOG]
 
 
 async def main():

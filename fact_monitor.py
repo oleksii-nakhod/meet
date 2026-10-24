@@ -7,6 +7,9 @@ people in the meeting (S1..). The checker must quote its evidence; a verdict onl
   * the evidence id exists and the quote really appears in that item (a model opinion with no evidence never
     takes the floor: the Meet 1 audit found "verified" corrections that no checker had verified),
   * it is not a repeat of a correction already made, and the cooldown has passed.
+Well-established general knowledge (G1: "the Earth is flat", a wrong capital, basic science) has no document to quote,
+so it needs more instead: confidence >= general_min_confidence and a second, independent call agreeing the statement
+is false. Opinions, predictions, recent events and anything debatable are excluded in both prompts.
 """
 from __future__ import annotations
 
@@ -19,12 +22,17 @@ from third_voice import parse_json
 from words import FACTY
 
 CHECK_SYS = """You check one statement made in a live meeting ({setting}) against evidence, to catch mistakes the group might act on.
-Evidence items have ids: F = fact sheet, D = document excerpt, S = something a participant said earlier.
+Evidence items have ids: F = fact sheet, D = document excerpt, S = something a participant said earlier, G1 = well-established general knowledge.
+Use G1 only when the statement is false by widely established, uncontroversial knowledge (the shape of the Earth, a country's capital, basic science, well-known history); then "evidence" is the true fact in one short sentence. Never use G1 for opinions, predictions, recent or changing events, people's own plans or circumstances, or anything experts debate.
 Decide whether the LATEST statement contradicts an evidence item about the same specific thing (a different amount, date, day, time, number, name, place, owner, rule or yes/no fact).
 Not contradictions: rounding, rewording, extra or missing detail, plans, guesses explicitly hedged ("maybe", "I think it might"), opinions, questions, hypotheticals, jokes, and changes someone explicitly announces ("we moved it to Friday").
 Output ONLY one JSON object:
-{{"contradicts": true or false, "evidence_id": "F2" or "D1" or "S3" or "", "evidence": "<the exact words copied from that evidence item>", "confidence": <0.0-1.0>, "correction": "<one short, polite spoken sentence to {speaker} that states what the evidence says and where it comes from, e.g. 'Sorry to jump in, {speaker} — the lease says rent is due on the 1st, not the 5th.'>"}}
+{{"contradicts": true or false, "evidence_id": "F2" or "D1" or "S3" or "", "evidence": "<the exact words copied from that evidence item>", "confidence": <0.0-1.0>, "correction": "<one short, polite spoken sentence to {speaker} that states what the evidence says and where it comes from, e.g. 'Sorry to jump in, {speaker} — the lease says rent is due on the 1st, not the 5th.' or, for G1, 'Sorry to jump in, {speaker} — actually the Earth is round, not flat.'>"}}
 If unsure, output contradicts false."""
+
+
+CONFIRM_SYS = """Decide whether the statement is false according to well-established, uncontroversial knowledge (science, geography, well-known history, definitions). Opinions, predictions, recent or changing events, personal circumstances and debated questions are never false by this standard.
+Output ONLY one JSON object: {"false": true or false, "confidence": <0.0-1.0>}"""
 
 
 @dataclass
@@ -83,6 +91,21 @@ class Monitor:
     corrected: set[str] = field(default_factory=set)
     last_correction: float = -1e9
     checks: int = 0
+    general: bool = True                 # also catch errors of well-established general knowledge (G1)
+    general_min_confidence: float = 0.9
+
+    def _accept(self, v: "Verdict", speaker: str) -> None:
+        """Last gate: not a repeat, and not too soon after the previous correction."""
+        key = _norm(v.evidence)[:80] + "|" + speaker.lower()
+        now = time.monotonic()
+        if key in self.corrected:
+            v.contradicts, v.reason = False, "already corrected"
+        elif now - self.last_correction < self.cooldown_s:
+            v.contradicts, v.reason = False, "cooldown"
+        else:
+            self.corrected.add(key)
+            self.last_correction = now
+            v.reason = "verified"
 
     def remember(self, claim: Claim) -> None:
         self.claims.append(claim)
@@ -103,6 +126,9 @@ class Monitor:
         for i, c in enumerate(earlier):
             label = f"{c.speaker}, earlier" if c.speaker != speaker else f"{speaker} said earlier"
             items.append((f"S{i + 1}", f"{c.speaker}: {c.text}", label, "speaker"))
+        if self.general:
+            items.append(("G1", "Well-established general knowledge (science, geography, well-known history)",
+                          "general knowledge", "general"))
         return items
 
     async def check(self, models, kb, *, speaker: str, text: str, setting: str, history: str) -> Verdict:
@@ -117,7 +143,20 @@ class Monitor:
             raw = await models.chat(system, user, max_tokens=220, temperature=0.0, timeout=6)
         except Exception as e:  # noqa: BLE001
             return Verdict(False, reason=f"check failed: {e}"[:120])
-        return self.judge(parse_json(raw), items, speaker=speaker, text=text)
+        v = self.judge(parse_json(raw), items, speaker=speaker, text=text)
+        if v.contradicts and v.kind == "general":  # no source to quote: an independent second opinion must agree
+            try:
+                d = parse_json(await models.chat(CONFIRM_SYS, f"Statement: {text}\n\nJSON only.", max_tokens=40,
+                                                 temperature=0.0, timeout=5))
+                conf = float(d.get("confidence", 0)) if isinstance(d, dict) else 0.0
+                ok = isinstance(d, dict) and d.get("false") is True and conf >= self.general_min_confidence
+            except Exception:  # noqa: BLE001
+                ok = False
+            if not ok:
+                v.contradicts, v.reason = False, "general-knowledge error not confirmed"
+                return v
+            self._accept(v, speaker)
+        return v
 
     def judge(self, d, items, *, speaker: str, text: str) -> Verdict:
         if not isinstance(d, dict) or not d.get("contradicts"):
@@ -133,9 +172,15 @@ class Monitor:
             v.contradicts, v.reason = False, f"cited evidence {eid or '(none)'} does not exist"
             return v
         _, item_text, v.source, v.kind = item
-        need = self.min_confidence + (0.05 if v.kind == "speaker" else 0.0)
+        need = (self.general_min_confidence if v.kind == "general"
+                else self.min_confidence + (0.05 if v.kind == "speaker" else 0.0))
         if conf < need:
             v.contradicts, v.reason = False, f"confidence {conf:.2f} < {need:.2f}"
+        elif v.kind == "general":
+            if not v.correction or len(v.evidence) < 4:
+                v.contradicts, v.reason = False, "no correction to say"
+            else:
+                v.reason = "needs confirmation"   # check() asks a second time before it may take the floor
         elif not quote_found(v.evidence, item_text):
             v.contradicts, v.reason = False, "the quoted evidence is not in the cited source"
         elif quote_found(v.evidence, text) and v.kind == "speaker" and item_text.endswith(text):
@@ -143,16 +188,7 @@ class Monitor:
         elif not v.correction:
             v.contradicts, v.reason = False, "no correction to say"
         else:
-            key = _norm(v.evidence)[:80] + "|" + speaker.lower()
-            now = time.monotonic()
-            if key in self.corrected:
-                v.contradicts, v.reason = False, "already corrected"
-            elif now - self.last_correction < self.cooldown_s:
-                v.contradicts, v.reason = False, "cooldown"
-            else:
-                self.corrected.add(key)
-                self.last_correction = now
-                v.reason = "verified"
+            self._accept(v, speaker)
         words = v.correction.split()
         if len(words) > 40:
             v.correction = " ".join(words[:40]).rstrip(",;") + "."

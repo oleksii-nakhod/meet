@@ -16,6 +16,13 @@ interruption). A switch on the call flips between the two so the difference can 
   A correction needs cited evidence that really exists in its source, confidence >= 0.8 and a 20 s cooldown. It cuts
   in, ducks everyone else, holds the floor for 2 s (`MEET_CORRECTION_GUARD`), then yields only to someone who keeps
   interrupting; what was said over it is answered afterwards.
+* **Immediate corrections, mid-sentence.** While someone talks, every ~1 s of new speech (`MEET_MIDCHECK_EVERY`)
+  what they've said so far is transcribed and checked against everything: the documents, the fact sheet, what others
+  said, and well-established general knowledge (`MEET_GENERAL_FACTS`; "the Earth is flat"). A confirmed error cuts in
+  at once, ~1.5 s after the wrong words, while they keep talking (live: 7.6-8 s before they finished), and plays to
+  the end: the corrected person carrying on doesn't stop it, only someone who starts pushing back after the 2 s guard
+  does. General-knowledge errors have no document to quote, so they need confidence >= 0.9 and a second, independent
+  check agreeing.
 * **Fast, filler-proof interruptions.** While Higgs talks, a listener's speech is re-transcribed every ~0.3 s on a
   probe session: "umm", "okay", "mm-hm" never stop it; a real interruption does (0.45 s live).
 * **Noise gate** on each person's speech detector (`noise_gate.py`, `MEET_NOISE_GATE`).
@@ -28,8 +35,8 @@ interruption). A switch on the call flips between the two so the difference can 
   cancels all work; the browser recovers from failed avatar connections; `.env` keeps `MEET_*` settings.
 * From `main`: the fixed meeting link (`MEET_ROOM`) and the room-loop timing fix.
 
-Tests: `BOSON_API_KEY=unused python -m pytest tests/test_*.py` (offline, 139 tests);
-`python tests/live_junaid3.py` (6 live scenarios against Boson; `--only l6` for the avatar); `./run.sh check`.
+Tests: `BOSON_API_KEY=unused python -m pytest tests/test_*.py` (offline, 144 tests);
+`python tests/live_junaid3.py` (7 live scenarios against Boson; `--only l6` for the avatar); `./run.sh check`.
 
 ## Setup
 
