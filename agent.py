@@ -1911,6 +1911,11 @@ class ImprovedBrain:
         why = d["reading"]
         if cut_i is not None and why.get("wrong"):
             speak, d["why"] = False, "corrected mid-line"  # Higgs already cut in on it
+        words = [w for w in re.findall(r"[a-z']+", text.lower()) if w != a.ai.lower()]
+        if not speak and a.ai.lower() in text.lower() and all(w in ("hey", "hi", "hello", "yo") for w in words):
+            # "Hey, Higgs." / "Higgs?": called, so it answers ("Yes?"); one judge vote in a one-to-one call said
+            # "nothing asked" now and then (greet_1to1)
+            speak, d["why"] = True, "called by name"
         t_decided = time.perf_counter()
         if tok is not None and not tok["decided"]:  # decided: a reply waiting on this line may go (or drop)
             tok["decided"] = True
