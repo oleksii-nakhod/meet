@@ -286,6 +286,25 @@ SCENARIOS9 = [  # edges from the 2026-10-23 calls (out/rooms): trailing "Oh.", r
          ("Alex", "Sorry, Higgs, stop, we're out of time."), "stop")]),
 ]
 
+SCENARIOS10 = [  # group turn-taking edges (2026-10-24)
+    dict(name="two_at_once", people=["Alex", "Priya", "Sam"], steps=[
+        ("say", "Alex", "Higgs, when do submissions close?", "reply", {"with": ("Priya", "Higgs, how long can the video be?")}),
+        ("say", "Sam", "Okay, thanks.", "any")]),
+    dict(name="third_person", people=["Alex", "Priya"], steps=[
+        ("say", "Alex", "I asked Higgs yesterday about the judging, it was pretty useful.", "silent"),
+        ("say", "Priya", "Yeah, Higgs said user experience matters a lot.", "silent"),
+        ("say", "Alex", "Higgs, how much is it worth exactly?", "reply")]),
+    dict(name="vocative_pause", people=["Alex", "Priya"], steps=[
+        ("say", "Alex", ["Higgs.", 2.0, "Quick one, how long can the video be?"], "reply", {"ack_ok": True}),
+        ("say", "Priya", ["Hey Higgs,", 1.5, "and when do submissions close?"], "reply", {"ack_ok": True})]),
+    dict(name="other_cuts_in", people=["Alex", "Priya"], steps=[
+        ("talk_over", "Alex", LONG_Q, ("Priya", "Sorry, Higgs, quick question, when do submissions close?"), "stop"),
+        ("await", "reply", 6.0)]),
+    dict(name="self_correct", people=["Alex", "Priya"], steps=[
+        ("say", "Alex", ["Higgs, when do submissions close,", 0.5, "no wait, how long can the video be?"], "reply"),
+        ("say", "Priya", "Thanks.", "any")]),
+]
+
 SCENARIOS = [
     # ---------------- one person and Higgs ----------------
     dict(name="greet_1to1", people=["Alex"], steps=[
@@ -438,6 +457,9 @@ async def run_step(step, bots_, ear, mode):
         if getattr(b, "gain_db", 0.0):  # a quiet (or hot) microphone
             pcm = np.clip(pcm.astype(np.float32) * 10 ** (b.gain_db / 20), -32768, 32767).astype(np.int16)
         t_start = b.now()
+        if "with" in opts:  # someone else talks at the same moment (both ask at once)
+            w2, sp2 = opts["with"]
+            bots_[w2].say(speech(sp2, voice_of(w2)))
         if "bleed" in opts:  # two people in one room: someone else's mic hears it too, quieter
             w2, db = opts["bleed"]
             bots_[w2].say(np.clip(pcm.astype(np.float32) * 10 ** (db / 20), -32768, 32767).astype(np.int16))
@@ -468,6 +490,11 @@ async def run_step(step, bots_, ear, mode):
             if any(m.get("stopped") for t, m in ear.evs("ai_state", t_start)):
                 got = "stopped by itself"
         ok = expect == "any" or got == expect
+        if cut_in and opts.get("ack_ok"):  # "Higgs." [pause] may get a "Yes?": the answer must still come after the line
+            await ear.wait_ai(max(0.1, t_end + win - ear.now()), since=t_end - 0.1)  # the answer, after the request
+            after = [o for o in ear.ai_onsets(t_start) if o[0] >= t_end - 0.1]
+            got, ok, cut_in = ("acknowledged, then replied" if after else "acknowledged only"), bool(after), []
+            row["ack_s"] = round(on[0][0] - t_start, 2)
         if cut_in:
             ok = False
             got = "talked over"
@@ -684,7 +711,7 @@ async def main_async(a):
     outdir = os.path.join(MEET, "out", "scen", a.tag)
     os.makedirs(outdir, exist_ok=True)
     pool = {"1": SCENARIOS, "2": SCENARIOS2, "3": SCENARIOS3, "4": SCENARIOS4, "5": SCENARIOS5, "6": SCENARIOS6, "7": SCENARIOS7,
-            "8": SCENARIOS8, "9": SCENARIOS9,
+            "8": SCENARIOS8, "9": SCENARIOS9, "10": SCENARIOS10,
             "all": SCENARIOS + SCENARIOS2}[a.set]
     todo = [(sc, m) for sc in pool if not a.only or sc["name"] in a.only for m in a.modes
             if m in sc.get("modes", ("default", "improved"))]
@@ -739,7 +766,7 @@ def main():
     ap.add_argument("--modes", nargs="+", default=["improved", "default"])
     ap.add_argument("--only", nargs="*")
     ap.add_argument("--servers", type=int, default=0, help="servers to spread the rooms over (default: one per room)")
-    ap.add_argument("--set", default="1", choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "all"])
+    ap.add_argument("--set", default="1", choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "all"])
     ap.add_argument("--par", type=int, default=4)
     ap.add_argument("--port", type=int, default=8641)
     ap.add_argument("--samples", type=int, default=0, help="judge samples per line (0: the agent's default)")

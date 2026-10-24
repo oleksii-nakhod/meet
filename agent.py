@@ -301,6 +301,13 @@ async def decide(r, ask, samples=3, prompt="v4b"):
     reading = dict(parsed[0] if parsed else {})
     if wrong:
         reading["wrong"] = True
+    cur, ai = r["current_turn"], r["target_speaker"]
+    if not parsed and (len(r["people"]) == 1 or re.search(rf"\b{re.escape(ai)}\b", cur["text"], re.I)
+                       or named_ai_before(r["context_turns"], cur["speaker"], ai)):
+        # every judge request failed (a Higgs hiccup): a line put to the AI is answered, not dropped as "nothing
+        # asked" ("Higgs." [pause] "Quick one, how long can the video be?" went unanswered, 0 votes)
+        return True, {"reading": {"to": "me"}, "why": "asked me (judge unavailable)", "votes": 0,
+                      "checks": [p.get("contradicts") for p in checks]}
     return speak, {"reading": reading, "why": reason(reading, speak), "votes": len(parsed), "checks":
                    [p.get("contradicts") for p in checks]}
 
@@ -1872,6 +1879,9 @@ class ImprovedBrain:
         one = a.avatar and reader is None  # TTS 3 + face: one sentence (its render waits for the whole speech)
         if one:  # the face renders only once the whole reply is spoken, and TTS takes about as long as the speech
             convo = "[Answer in one short sentence of at most 12 words.]\n" + convo
+        if vocative_only(text, a.ai) and not re.search(r"\?\s*$", text):  # "Higgs." / "Hey, Higgs." and a pause
+            # the request usually follows: "Yes?", not "Hello, Alex. How can I assist you today?" to be talked over
+            convo = "[They only said your name: answer with a short acknowledgement like \"Yes?\", at most 4 words.]\n" + convo
         # Likely a reply (a one-to-one call, the AI's name, a question): voice the draft while it streams in and the
         # judge decides (~0.5 s sooner). Otherwise draft only; a silent line costs no speech.
         spec = None
