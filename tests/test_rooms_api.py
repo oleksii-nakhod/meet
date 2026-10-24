@@ -1,6 +1,7 @@
 """Creating rooms with a chosen ID (stub agent, no API calls)."""
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["MEET_AGENT"] = "stub"
@@ -20,7 +21,6 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "MODELS", None)
     monkeypatch.setattr(server, "ROOMS", {})
     monkeypatch.setattr(server, "ADMIN", "")
-    monkeypatch.setattr(server, "FIXED", "")
     with TestClient(server.app) as c:
         yield c
 
@@ -39,10 +39,35 @@ def test_chosen_id_and_conflicts(client):
     assert rid != "team-sync" and rid in server.ROOMS
 
 
-def test_default_room_id_is_taken(client, monkeypatch):
-    monkeypatch.setattr(server, "FIXED", "lobby")
-    assert client.post("/api/rooms", json={"id": "lobby"}).status_code == 409  # even before anyone opened it
-    assert client.get("/api/rooms/lobby").status_code == 200
+def test_room_nobody_joined_is_freed_after_idle(client):
+    client.post("/api/rooms", json={"id": "standup", "title": "First"})
+    server.ROOMS["standup"].empty_since -= server.IDLE - 5  # created 5 s short of the limit: still there
+    assert client.get("/api/rooms/standup").status_code == 200
+    server.ROOMS["standup"].empty_since -= 10
+    assert client.get("/api/rooms/standup").status_code == 404 and "standup" not in server.ROOMS
+    r = client.post("/api/rooms", json={"id": "Standup", "title": "Second"})  # the ID is free again
+    assert r.status_code == 200 and client.get("/api/rooms/Standup").json()["title"] == "Second"
+
+
+def test_room_is_freed_only_once_empty_that_long(client):
+    client.post("/api/rooms", json={"id": "sync"})
+    rm = server.ROOMS["sync"]
+    with client.websocket_connect("/ws/room?room=sync&pid=p1&name=Ann"):
+        for _ in range(100):
+            if rm.humans:
+                break
+            time.sleep(0.01)
+        assert rm.empty_since is None
+        rm.created -= 3600  # however old the room is, it isn't freed while someone is in it
+        assert client.get("/api/rooms/sync").status_code == 200
+    for _ in range(100):
+        if rm.empty_since is not None:
+            break
+        time.sleep(0.01)
+    assert time.time() - rm.empty_since < 5  # the clock starts when the last person leaves
+    assert client.get("/api/rooms/sync").status_code == 200
+    rm.empty_since -= server.IDLE
+    assert client.get("/api/rooms/sync").status_code == 404
 
 
 def test_no_listing_and_admin_still_honored(client, monkeypatch):

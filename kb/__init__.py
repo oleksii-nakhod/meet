@@ -273,6 +273,11 @@ class Library:
             self.open[cid] = KnowledgeBase(self.dir / cid, cid)
         return self.open[cid]
 
+    def drop(self, cid: str) -> None:
+        """Stop holding a collection open (it stays on disk; get() opens it again). Not closed here: an ingest that
+        is still running may hold it, and the connection closes when the last user lets go."""
+        self.open.pop(re.sub(r"[^A-Za-z0-9_-]", "", cid)[:64] or "default", None)
+
     def list(self) -> list[dict]:
         out = []
         for d in sorted(self.dir.iterdir()):

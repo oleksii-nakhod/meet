@@ -1,10 +1,10 @@
 """Meet: a small video call (2-5 people) joined by link, with an AI participant ("Higgs") on slot 0.
 
   /                         join a room by its id or link, or create one
-  POST /api/rooms          -> {"id", "link": "/r/<id>"}; "id" is optional (letters, digits, - and _; taken -> 409);
+  POST /api/rooms           -> {"id", "link": "/r/<id>"}; "id" is optional (letters, digits, - and _; taken -> 409);
                             needs the MEET_ADMIN token (field "admin" or X-Admin) only if that is set
-                            MEET_ROOM=<id>: a default room at /r/<id> that exists from the start
-  /r/<id>[?k=passcode]      join screen, then the call
+  /r/<id>[?k=passcode]      join screen, then the call; a room empty for MEET_ROOM_IDLE s (600) is freed: the link
+                            stops working and the id can be used again
   /ws/room?room=&pid=&name=&k=   control JSON + 20 ms int16 24 kHz audio (server -> client: 1 byte slot + PCM)
   /ws/video?room=&pid=      camera JPEGs (1 byte slot + JPEG) and the AI's avatar video (slot 0: fMP4 chunks)
 
@@ -16,6 +16,7 @@ import os
 import re
 import secrets
 import sys
+import time
 
 from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -39,23 +40,34 @@ except Exception as e:  # noqa: BLE001  (no key / stub agent: documents are stil
 
 WEB = os.path.join(HERE, "web")
 ADMIN = os.environ.get("MEET_ADMIN", "")
-FIXED = os.environ.get("MEET_ROOM", "")  # a default room that exists from the start (public.sh sets it)
 MAX_ROOMS = int(os.environ.get("MEET_MAX_ROOMS", "100"))  # anyone can create rooms, so there's a cap
+IDLE = float(os.environ.get("MEET_ROOM_IDLE", "600"))  # a room empty this long (s) is freed
 ROOM_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 ROOMS = {}
 
 app = FastAPI()
 
 
+def free_idle_rooms():
+    """Forget rooms nobody has been in for IDLE seconds (counted from creation if nobody ever joined). The agent and
+    avatar already stopped when the room emptied; this frees the id and the link."""
+    now = time.time()
+    for rid, room in list(ROOMS.items()):
+        if room.empty_since is not None and now - room.empty_since >= IDLE:
+            del ROOMS[rid]
+            room.log({"type": "freed"})
+            room_module.LIBRARY.drop(rid)
+            print(f"room freed after {IDLE:g} s empty: {rid}", flush=True)
+
+
 def get_room(rid):
-    if rid and rid == FIXED and rid not in ROOMS:  # the default room exists before anyone opens it
-        ROOMS[rid] = Room("Meeting", rid=FIXED)
+    free_idle_rooms()
     return ROOMS.get(rid)
 
 
 def taken(rid):
     """A room has this id, ignoring case (so /r/standup and /r/Standup can't be two different rooms)."""
-    return any(rid.lower() == r.lower() for r in [*ROOMS, FIXED] if r)
+    return any(rid.lower() == r.lower() for r in ROOMS)
 
 
 @app.get("/api/config")
@@ -72,6 +84,7 @@ async def create_room(request: Request):
         body = {}
     if ADMIN and not secrets.compare_digest(str(body.get("admin") or request.headers.get("x-admin") or ""), ADMIN):
         return JSONResponse({"error": "admin token required"}, status_code=403)
+    free_idle_rooms()
     rid = str(body.get("id") or "").strip()
     if rid and not ROOM_ID.fullmatch(rid):
         return JSONResponse({"error": "A room ID is 1-64 letters, digits, - or _."}, status_code=400)
@@ -277,7 +290,5 @@ if __name__ == "__main__":
         from mmhm.local_https import uvicorn_ssl
         ssl = uvicorn_ssl()
     print(f"agent: {sys.modules[Room.__module__].HiggsAgent.__module__}", flush=True)
-    if FIXED:
-        print(f"default room: /r/{FIXED}", flush=True)
     print(f"meet on {'https' if a.https else 'http'}://{a.host}:{a.port}/" + ("  (MEET_ADMIN set: creating rooms needs ?admin=<token>)" if ADMIN else ""), flush=True)
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning", **ssl)

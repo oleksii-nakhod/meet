@@ -158,7 +158,7 @@ class Room:
         self.humans = {}  # slot -> Human
         self.last_slot = {}  # pid -> slot it had, so a reconnect gets the same tile back
         self.idle_url = None
-        self.created = time.time()
+        self.created = self.empty_since = time.time()  # empty_since: None while anyone is in; server.py frees idle rooms
         os.makedirs(LOG_DIR, exist_ok=True)
         self.log_path = os.path.join(LOG_DIR, f"{self.id}.jsonl")
         self._started, self._life, self.errors = False, asyncio.Lock(), 0
@@ -320,6 +320,7 @@ class Room:
             h.video, h.cam, h.mic = old.video, old.cam, old.mic
         self.humans[slot] = h
         self.last_slot[pid] = slot
+        self.empty_since = None
         self.log({"type": "join", "slot": slot, "name": name, "rejoin": bool(old)})
         h.out.json(self.ai_state())
         if self.agenda:
@@ -332,6 +333,8 @@ class Room:
         if self.humans.get(h.slot) is not h:
             return  # already replaced by a reconnect
         del self.humans[h.slot]
+        if not self.humans:
+            self.empty_since = time.time()
         h.out.close()
         if h.video:
             h.video.close()

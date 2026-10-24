@@ -33,7 +33,7 @@ interruption). A switch on the call flips between the two so the difference can 
   can't hold up answers; the audio loop is supervised; the voice fallback never rewinds; the floor and ducking are
   released when audio was heard, not sent; per-room avatar identities; pools rebuilt only when needed; shutdown
   cancels all work; the browser recovers from failed avatar connections; `.env` keeps `MEET_*` settings.
-* From `main`: a default room link (`MEET_ROOM`) and the room-loop timing fix.
+* From `main`: the room-loop timing fix.
 
 Tests: `BOSON_API_KEY=unused python -m pytest tests/test_*.py` (offline, 144 tests);
 `python tests/live_junaid3.py` (7 live scenarios against Boson; `--only l6` for the avatar); `./run.sh check`.
@@ -65,8 +65,10 @@ The models download from Hugging Face on first use. `ffmpeg` is needed only to r
 The home page has two tabs. **Join a room** takes a room ID or a pasted room link (a link's `?k=` passcode comes
 along); rooms aren't listed, so you join one you were given. **Create a room** (`/#create`) takes an optional room
 ID (letters, digits, `-`, `_`; it becomes the link `/r/<id>`, empty gives a random one); an ID that's already in use,
-ignoring case, is refused. Anyone can create rooms unless `MEET_ADMIN` is set; `MEET_MAX_ROOMS` (default 100) caps
-how many one server run holds, and `MEET_ROOM=<id>` makes a default room that exists from the start.
+ignoring case, is refused. A room nobody has been in for 10 minutes (`MEET_ROOM_IDLE`, seconds; counted from
+creation if nobody joins) is freed: its link stops working and its ID can be used again (its documents stay in
+`data/kb/<id>/`, but a new room with that ID starts without them). Anyone can create rooms unless `MEET_ADMIN` is
+set; `MEET_MAX_ROOMS` (default 100) caps how many exist at once.
 
 ### LiveKit media and live avatar
 
