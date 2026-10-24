@@ -695,6 +695,8 @@ EARLY_READ = os.environ.get("MEET_EARLY_READ", "1") == "1"
 # is read after all. HOP_WAIT: how long after the decision a one-hop answer may take to have its first sentence.
 ONEHOP = os.environ.get("MEET_ONEHOP", "1") == "1"
 HOP_WAIT = 1.2
+# With the live face, the turn-taking models get Higgs's voice delayed by the face's lag, as people hear it (MEET_LIVE_ALIGN)
+LIVE_ALIGN = os.environ.get("MEET_LIVE_ALIGN", "0") == "1"
 HOP_WORDS = 10  # ... or its first 10 words, if the first sentence is longer
 RT_FIRST_S = 2.0   # no Realtime speech this long after asking (~0.6 s normally; a voice session still opening under
 #                    load took 12 s): TTS 3 voices the reply instead
@@ -1615,6 +1617,7 @@ class ImprovedBrain:
         self.line_by = {}         # line id -> slot of who said it
         # Higgs's output level over the last 0.6 s (echo gate); 2.6 s kept, as a live face is heard ~1.3 s late
         self.out_db = deque([-90.0], maxlen=130)
+        self.out_frames = deque(maxlen=130)  # its last 2.6 s of output frames (LIVE_ALIGN)
         self.reader = None        # Pool of Realtime voice sessions for replies (opened on first use)
 
     def voice(self):
@@ -2062,10 +2065,15 @@ class ImprovedBrain:
 
     async def tick(self, frames):
         t = self.t = self.t + TICK
-        total = np.zeros(N, np.int32) + self.last_out
+        live = live_face(self.a.room)
+        self.out_frames.append(self.last_out)
+        heard = self.last_out
+        if live and LIVE_ALIGN:  # the turn-taking models hear Higgs when people do: the face says it ~lag s later
+            k = int(round(live.lag / TICK))
+            heard = self.out_frames[-1 - k] if len(self.out_frames) > k else np.zeros(N, np.int16)
+        total = np.zeros(N, np.int32) + heard
         # Higgs's voice can come back through a person's speakers 0.1-0.5 s later: compare with its recent loudest frame
         self.out_db.append(frame_db(self.last_out))
-        live = live_face(self.a.room)
         loud = max(self.out_db) if live else max(itertools.islice(self.out_db, max(0, len(self.out_db) - 30), None))
         echo_db = loud if loud > -60 else None
         for f in frames.values():

@@ -217,11 +217,11 @@ Improved mode, live face on where noted, real Higgs:
 
 | test | result |
 |---|---|
-| `scenarios.py --set all` (37 scenes) | 104/104 (102–104 across runs; the misses were a judge borderline and a quiet −6 dB interruption) |
+| `scenarios.py --set all` (37 scenes) | 103/104 on the final commit, reply heard median 1.46 s, p90 2.52 s (102–104 across runs; the misses: a quiet −6 dB interruption, a judge borderline) |
 | `--set 9` (2026-10-23 edges) / `--set 10` (group turn-taking edges) / `--set 8` (barge-in) | 30/30, 11/11, 5/5 |
 | `--set 3` (avatar, live face) / `--set 7` (five people, drop/rejoin, flips) / `--set 5`, `--set 6` | 15/15, 18/18, 6/6, 9/9 |
 | `--set 4` (past the 5-minute idle timeout) | 6/6 |
-| MSI-Bench through the call (A/B at the same time as main) | 22/24 answered, 1 premature, median 1.35 s (main: 22/24, 0, 1.43 s) |
+| MSI-Bench through the call | 22/24 answered, 1–3 premature across runs, median 1.21–1.35 s (main, at the same time: 21–22/24, 0–1 premature, 1.36–1.43 s) |
 | `soak.py --cycles 40 --avatar` (20 min, live face) | 40/40 questions answered, median ~1.75 s, one live session throughout |
 | B2 meeting in 3 Chromium pages with the live face | 26/26 silent, 4/6 speak (the two known misses) |
 | `browser_bc.py --mode improved --avatar` (real Chrome mic) | 8/8 answered, 0/8 backchannels stopped it |
