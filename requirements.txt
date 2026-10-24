@@ -13,6 +13,9 @@ transformers
 huggingface-hub
 pydub
 seaborn
+# the live face (live_avatar.py: Boson realtime avatar in a LiveKit room); its DataStreamAudioOutput is the avatar's
+# audio protocol. Also installs sounddevice, which the server never uses (mmhm/stubs shadows it).
+livekit-agents==1.8.8
 # local speech-to-text fallback when Higgs STT is down (optional: without it, lines go untranscribed)
 faster-whisper
 # tests only

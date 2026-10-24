@@ -14,6 +14,7 @@ Every Higgs request is counted (CALLS); above MEET_BUDGET the agent stops asking
 import asyncio
 import base64
 import dataclasses
+import itertools
 import os
 import re
 import threading
@@ -448,6 +449,11 @@ def load_fillers():
         finally:
             FILLERS["loading"] = False
     threading.Thread(target=work, daemon=True).start()
+
+
+def live_face(room):
+    """The room's live avatar (live_avatar.LiveAvatar) while it is up, else None."""
+    return getattr(room, "live", None)
 
 
 ECHO_DB = float(os.environ.get("MEET_ECHO_DB", "25"))  # quieter than Higgs's output by this much while it talks: echo
@@ -1146,7 +1152,8 @@ class ImprovedBrain:
         self.lab_t = 0.0
         self.voice_at = 0.0       # perf_counter when anyone last made a sound
         self.line_by = {}         # line id -> slot of who said it
-        self.out_db = deque([-90.0], maxlen=30)  # Higgs's output level over the last 0.6 s (echo gate)
+        # Higgs's output level over the last 0.6 s (echo gate); 2.6 s kept, as a live face is heard ~1.3 s late
+        self.out_db = deque([-90.0], maxlen=130)
         self.reader = None        # Pool of Realtime voice sessions for replies with the face on (opened on first use)
 
     def voice(self):
@@ -1370,7 +1377,9 @@ class ImprovedBrain:
         total = np.zeros(N, np.int32) + self.last_out
         # Higgs's voice can come back through a person's speakers 0.1-0.5 s later: compare with its recent loudest frame
         self.out_db.append(frame_db(self.last_out))
-        echo_db = max(self.out_db) if max(self.out_db) > -60 else None
+        live = live_face(self.a.room)
+        loud = max(self.out_db) if live else max(itertools.islice(self.out_db, max(0, len(self.out_db) - 30), None))
+        echo_db = loud if loud > -60 else None
         for f in frames.values():
             total += f
         for slot, li in list(self.listeners.items()):
@@ -1468,6 +1477,8 @@ class ImprovedBrain:
                 timing["play"] = round(now - t0, 2)
                 timing["speculated"] = bool(m.get("speculated"))
                 timing["gate"] = m.get("gate")
+                if live_face(self.a.room):  # the live face plays it this much later (live_avatar.py)
+                    timing["live_lag"] = round(live_face(self.a.room).lag, 2)
                 await self.a.status("speaking", after_s=round(now - r.t_end, 2), why=r.play_why, timing=timing)
                 await self.a.room.event({"type": "ai_say", "text": r.text})
             gains = []
@@ -1489,6 +1500,8 @@ class ImprovedBrain:
                 out = np.zeros(N, np.int16)
                 out[:len(a) // 2] = np.frombuffer(a, np.int16)
                 r.pos += len(a) // 2
+            elif r.done and live_face(self.a.room) and live_face(self.a.room).playing():
+                pass  # all sent, but the live face is still saying the end (~1.3 s behind): it can be interrupted
             elif r.done:
                 self.playing = None
                 r.cancel = True  # the words are over: video still rendering (a part's padding) isn't sent
@@ -1505,7 +1518,9 @@ class ImprovedBrain:
         r.speaker.cancel()
         if r.vstarted:
             await self.a.room.avatar_stop()
-        heard = floor.truncate(r.text, [(a / SR, b / SR, x) for a, b, x in r.speaker.segments], r.pos / SR)
+        live = live_face(self.a.room)
+        pos = max(0, r.pos - int(live.lag * SR)) if live else r.pos  # a live face is heard ~1.3 s after the push
+        heard = floor.truncate(r.text, [(a / SR, b / SR, x) for a, b, x in r.speaker.segments], pos / SR)
         if r.hist_idx is not None and r.hist_idx < len(self.a.history):
             # marked, so the judge and the writer know it was cut off (unmarked, the writer resumed its old answer)
             self.a.history[r.hist_idx]["text"] = f"{heard} [interrupted]"
@@ -1727,9 +1742,11 @@ class HiggsAgent:
             self._launch()
 
     def set_avatar(self, on):
-        """Both modes: improved renders ahead (Realtime voice, a "Hmm." filler, long replies in two parts); default
-        holds each whole reply until its face renders (DefaultBrain)."""
-        self.avatar = bool(on)
+        """Rendered faces (no LiveKit, or the live face failed). Both modes: improved renders ahead (Realtime voice, a
+        "Hmm." filler, long replies in two parts); default holds each whole reply until its face renders (DefaultBrain).
+        A live face (room.live_state, live_avatar.py) needs none of that: replies play as with the face off, and the
+        room streams them to it. The room calls this again whenever its live face starts, ends or fails."""
+        self.avatar = bool(on) and getattr(self.room, "live_state", None) not in ("starting", "on")
         if self.avatar and AVATAR_FILLER:
             load_fillers()
         if self.avatar:

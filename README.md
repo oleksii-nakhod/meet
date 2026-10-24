@@ -13,6 +13,7 @@ interruption). A switch on the call flips between the two so the difference can 
     pip install -r requirements.txt
     pip install --no-deps maai==0.2.25      # turn-taking models (MaAI); its GUI/audio-device deps are stubbed
     cp .env.example .env                    # and put your BOSON_API_KEY in it (or export BOSON_API_KEY)
+                                            # + LIVEKIT_URL/_API_KEY/_API_SECRET for the live face (optional, below)
     playwright install chromium             # tests that use a browser only
 
 CPU is enough: each person in an improved-mode room runs the turn-taking models in their own process (~0.7 core).
@@ -35,7 +36,8 @@ The models download from Hugging Face on first use. `ffmpeg` is needed only to r
 - `server.py`, `room.py`: the call: rooms, the WebSocket audio/video relay, the agent interface. `web/`: the browser
   UI (create page with meeting presets, call page, avatar assets).
 - `agent.py` (`HiggsAgent`): Higgs on slot 0, both brains. `floor.py`: when to take, keep and give up the floor.
-  `avatar.py`: Higgs Avatar rendering. `stub_agent.py`: used if `agent.py` can't be imported or `MEET_AGENT=stub`.
+  `avatar.py`: Higgs Avatar rendering. `live_avatar.py`: the live face (a realtime Boson avatar in a LiveKit room;
+  `web/vendor/` has the LiveKit browser SDK it plays with). `stub_agent.py`: used if `agent.py` can't be imported or `MEET_AGENT=stub`.
 - `mmhm/`: Mm-hm, the turn-taking layer from the team's earlier prototype: the Higgs Realtime/TTS client
   (`higgs.py`), the default-mode engine (`engine.py`), MaAI turn-taking and backchannel models (`models.py`),
   expressive speech (`expressive.py`).
@@ -84,7 +86,37 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
   (2026-10-23, `--set 3`, 12/12; 9–15 s answers ~5–6.6 s). Only someone taking the floor (0.8 s of speech) cancels a
   reply while its face renders; a "mm" doesn't. Default: each whole Realtime reply is held until its face renders
   (~2.9–3.7 s, no filler, no early part: the wait is what plain Higgs plus a face looks like), and speech stops it as
-  before. A pre-rendered idle loop plays between replies.
+  before. A pre-rendered idle loop plays between replies. With LiveKit configured the face is live instead (next).
+
+### Live face (LiveKit, `live_avatar.py`; 2026-10-23)
+
+The rendered face can only start once a reply's whole speech exists, so the reply waits for it. With `LIVEKIT_URL`,
+`LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` set (a [LiveKit Cloud](https://cloud.livekit.io) project; Boson refuses
+self-hosted LiveKit), turning the avatar on starts a **realtime Boson avatar session** instead, one per room, released
+when the avatar is turned off or the room empties (a session that ends is replaced; 3 failed starts fall back to the
+rendered face). Higgs then talks exactly as with the face off (no render wait, no "Hmm.", normal-length replies), and
+`room.py` streams every 20 ms frame it sends to slot 0 to the avatar over a LiveKit data stream (`DataStreamAudioOutput`,
+the protocol Boson's avatar speaks). The avatar publishes lip-synced video + that audio into a LiveKit room; each page
+joins it subscribe-only (a token in the `live_avatar` message) and plays both on the AI tile, instead of slot 0's
+socket audio. The call itself (people's audio and cameras) stays on Meet's own sockets.
+
+- **Faster replies:** with real Higgs (`tests/live_avatar_e2e.py`, one-to-one, 4 questions per mode) the face is
+  heard 2.5–3.4 s after the question in improved (median 3.1 s; the rendered face: 3.7–5.0 s, 5–6.6 s for long
+  answers) and 2.4–2.9 s in default (median 2.7 s). Session start: ~1.2–1.5 s after the switch.
+- **The lag:** the avatar says a frame ~1.1–1.7 s after it is sent (median ~1.3 s; the same when audio is pushed
+  seconds ahead, so it is the avatar's pipeline). Improved Higgs accounts for it: a reply counts as playing until the
+  avatar reports `playback_finished` (it comes within ~0.1 s of the last sound), so an interruption in that tail still
+  stops it; "what was heard" is the sent position minus the lag (the measured lag is in each reply's `timing.live_lag`);
+  the echo gate compares against Higgs's output over the last 2.6 s instead of 0.6 s.
+- **Interruptions:** Meet stops Higgs ~0.5 s into the interruption as before; the avatar's pipeline would still play
+  ~1.2 s after that, so pages mute the face's audio at once on `ai_flush` for `drain` (1.25 s) and the lips run on
+  silently. `ai_gain` (ducking for a "mm-hm") sets its volume.
+- **Faces:** Boson's presets only (`MEET_LIVE_AVATAR_ID`: `builtin_claire_v1` (default), `builtin_emma_v1`,
+  `builtin_james_v1`); a custom portrait isn't offered for live sessions. Video 480x640 at 24 fps (a new viewer starts
+  on LiveKit's 240x320 layer and steps up within ~10 s).
+- Bots and `tests/scenarios.py` still hear slot 0 on the socket (when it is sent, not when the face says it).
+- Env: `MEET_LIVE_AVATAR=0` (rendered face even with LiveKit set), `MEET_LIVE_AVATAR_ID`, `MEET_LIVE_AVATAR_MAX`
+  (session length, 3600 s, the account cap; then a new session).
 
 Scripted test (`tests/meeting_run.py`): roommates meeting B2 from Third Voice's test set, 3 people, 32 lines, 6
 where the AI should speak. Each person's lines are their own fake microphone in headless Chromium, so the
@@ -168,9 +200,10 @@ silence rules), `MEET_VOICE`, `MEET_STT_FALLBACK=0` (no local transcription when
 - **Showing default vs improved live:** default Higgs is reliably derailed by a clear "yeah" or "uh-huh" while it
   talks (it stops and answers the backchannel), by a mid-sentence thinking pause (it talks over it), and by people
   talking to each other (it answers them). A soft hummed "mm" often doesn't trigger its voice detector at all.
-- **Avatar:** in improved the face says "Hmm." ~1.5–2.4 s after the line and the answer follows ~2–3 s later (it
-  waits for a quiet moment if someone talks into that pause); in default the reply just comes ~3 s later than without
-  the face.
+- **Avatar:** with LiveKit set, the live face (above): replies come ~1.3–1.7 s later than without the face, and
+  pages need to reach `*.livekit.cloud` (WebRTC). Rendered face: in improved the face says "Hmm." ~1.5–2.4 s after the
+  line and the answer follows ~2–3 s later (it waits for a quiet moment if someone talks into that pause); in default
+  the reply just comes ~3 s later than without the face.
 
 ## Rooms
 
@@ -195,7 +228,8 @@ run's lines and decisions can be matched to script steps.
   `bufferedAmount` > 64 KB); server → client 1 byte slot + JPEG, newest frame per sender wins. Slot 0 = Higgs avatar:
   fMP4 chunks for a MediaSource, between `avatar_start {mime}` and `avatar_stop`; `avatar_idle {url}` loops a file.
 - Server → client JSON: `roster`, `chat`, `ai_flush`, `ai_gain`, `ai_state` (+ `by` when a person changed it),
-  `line`, `ai_say`, `lab`. Client → server JSON: `chat`, `set_mode`, `set_avatar`, plus `mic`/`cam` `{on}` (roster
+  `line`, `ai_say`, `lab`, `live_avatar` (`{on: true, url, token, room, identity, drain}`: join this LiveKit room
+  subscribe-only and play `identity`'s tracks as Higgs; `{on: false}`: leave it). Client → server JSON: `chat`, `set_mode`, `set_avatar`, plus `mic`/`cam` `{on}` (roster
   shows muted/camera-off).
 
 ## Agent interface (see `room.py`)
@@ -215,12 +249,15 @@ These only enqueue: each socket has its own sender, audio for a client that fall
 ## Test
 
     python tests/fake_room.py      # 3 headless Chromium pages with fake voices and cameras, then HTTPS; no Higgs calls
+    python tests/live_avatar_browser.py   # the live face in 2 Chromium pages, stub agent (a real avatar session, ~1 min)
+    python tests/live_avatar_probe.py     # the avatar alone: session start, lag, dropouts, clear(), fps
     python -m pytest tests/test_floor.py tests/test_agent_rules.py   # timing + text rules, no API (./run.sh tests)
 
 With Higgs (each makes real API calls; keep to ~3 servers at once, Higgs caps concurrent sessions per key):
 
     python tests/scenarios.py --set all --modes improved default --par 3   # 37 interactive scenes, bots over /ws/room
     python tests/scenarios.py --set 3     # with the Avatar     --set 4: past Higgs's 5-minute idle timeout
+    python tests/live_avatar_e2e.py       # live face: when it is heard after a question, and an interruption
     python tests/judge_cases.py [--file judge_heldout.jsonl]   # the speak/silent decision on 63 / 120 written lines
     python tests/tv_regress.py --set test --prompts v4b v5     # Third Voice's group test set through agent.decide
     python tests/writer_cases.py          # what the reply writer says, two prompt versions side by side

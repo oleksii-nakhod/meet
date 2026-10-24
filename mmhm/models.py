@@ -16,7 +16,9 @@ import numpy as np
 
 _STUBS = os.path.join(os.path.dirname(__file__), "stubs")
 if os.path.isdir(_STUBS) and _STUBS not in sys.path:
-    sys.path.append(_STUBS)  # maai imports pyaudio/pygame for devices we never open
+    # maai imports pyaudio/pygame/sounddevice for devices we never open. First on the path: livekit-agents installs the
+    # real sounddevice, whose import fails on a server without an audio device (PortAudio).
+    sys.path.insert(0, _STUBS)
 
 import torch  # noqa: E402
 from maai import Maai, MaaiInput  # noqa: E402
