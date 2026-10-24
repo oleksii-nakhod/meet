@@ -8,7 +8,7 @@ const LAB = QS.has("lab");
 const MODE_LABEL = { default: "default Higgs", improved: "Mm-hm + Third Voice" };
 const W = (window.meet = { audioRx: {}, videoRx: {}, msgs: {}, errors: [], audioTx: 0, videoTx: 0, videoSkip: 0,
   peak: [], roster: null, slot: null, ai: { mode: "default", avatar: false, status: "listening" }, levels: [], gain0: 1,
-  avatar: { starts: 0, chunks: 0, played: 0 } });
+  humanGain: 1, avatar: { starts: 0, chunks: 0, played: 0 } });
 const store = (s, k, v) => { try { if (v === undefined) return s.getItem(k); s.setItem(k, v); } catch { return null; } };
 const wsUrl = (p) => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${p}`;
 const bump = (o, k) => (o[k] = (o[k] || 0) + 1);
@@ -17,10 +17,14 @@ window.addEventListener("unhandledrejection", (e) => W.errors.push(String(e.reas
 
 let info, pid, myName, passcode = QS.get("k") || "";
 let ws, vws, ctx, mixer, micNode, stream, camVideo, left = false, joined = false, retry = 0, vretry = 0;
+let lkRoom = null, lkConnecting = null, lkCred = null; // LiveKit: only while the live avatar is on
+const lkAudio = new Map();
+const LK_MIC_OPTIONS = { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 };
 let muted = false, camOn = true, selfPeak = 0, capBusy = false, capTimer;
 const tiles = {}; // slot -> tile element
 let aiName = "Higgs";
 let agenda = null, step = 0; // the room's script (web/agendas.js) and the shared cursor in it
+let kbPanel = null;          // the knowledge-base panel (web/kb.js), mounted on first join
 
 function newPid() {
   const a = new Uint8Array(12); crypto.getRandomValues(a);
@@ -70,6 +74,11 @@ async function join() {
 }
 
 async function setupMedia() {
+  if (info.livekit) {
+    camVideo = document.createElement("video");
+    camVideo.muted = true; camVideo.playsInline = true; camVideo.autoplay = true;
+    return; // LiveKit acquires and publishes the devices after its room connection is authorized.
+  }
   const audio = { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 };
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio, video: { width: 320, height: 240, frameRate: { ideal: 15 } } });
@@ -133,6 +142,7 @@ function connect() {
 
 function onMessage(e) {
   if (typeof e.data !== "string") {
+    if (info.livekit || !mixer) return;
     bump(W.audioRx, new Uint8Array(e.data, 0, 1)[0]);
     mixer.port.postMessage(e.data, [e.data]);
     return;
@@ -141,14 +151,18 @@ function onMessage(e) {
   bump(W.msgs, m.type);
   if (m.type === "roster") onRoster(m);
   else if (m.type === "chat") addChat(m);
-  else if (m.type === "ai_flush") mixer.port.postMessage({ flush: 0 });
-  else if (m.type === "ai_gain") mixer.port.postMessage({ gain: Math.max(0, Math.min(1, +m.gain)), slot: 0, ramp: 0.03 });
+  else if (m.type === "ai_flush") { if (mixer) mixer.port.postMessage({ flush: 0 }); }
+  else if (m.type === "ai_gain") { if (mixer) mixer.port.postMessage({ gain: Math.max(0, Math.min(1, +m.gain)), slot: 0, ramp: 0.03 }); }
+  else if (m.type === "human_gain") setHumanGain(m.gain, m.reason);
+  else if (m.type === "user_buffering" && m.active) toast(`Listening to ${m.name}; processing it after the correction`, "mode");
   else if (m.type === "ai_state") onAiState(m);
   else if (m.type === "line") addLine(m);
   else if (m.type === "ai_note") toast(m.text, "mode");
-  else if (m.type === "ai_say") aiSay(m.text);
+  else if (m.type === "ai_say") aiSay(m.text, m.source, m.correction);
+  else if (m.type === "correction") toast(`${aiName} is correcting ${m.speaker}${m.source ? ` (source: ${m.source})` : ""}`, "mode");
   else if (m.type === "lab") lab(m);
   else if (m.type === "script") setStep(m.step, false);
+  else if (m.type === "kb") kbPanel?.update(m);
 }
 
 function onRoster(m) {
@@ -159,6 +173,7 @@ function onRoster(m) {
     $("rtitle").textContent = m.title || info.title;
     toast("Use headphones so nobody hears themselves echo.");
     if (agenda) { markMine(); showScript(store(localStorage, "meet_script") !== "0"); }
+    if (!kbPanel) import("/kb.js").then((mod) => { kbPanel = mod.mountKB($("kb"), RID, { by: myName, live: true }); }).catch(() => {});
   } else if (W.roster) {
     const before = new Set(W.roster.people.map((p) => p.slot + p.name));
     const now = new Set(m.people.map((p) => p.slot + p.name));
@@ -171,7 +186,7 @@ function onRoster(m) {
   $("count").textContent = `${m.people.length} ${m.people.length === 1 ? "person" : "people"} + ${aiName}`;
   renderTiles(m);
   onAiState({ ...m.ai, type: "ai_state" });
-  if (!vws || vws.readyState > 1) connectVideo();
+  if (!vws || vws.readyState > 1) connectVideo(); // people's video always uses the video socket
 }
 
 // ---------- tiles ----------
@@ -185,7 +200,9 @@ function makeTile(slot) {
       <div class="cap"></div><div class="name"></div>`;
   } else {
     t.innerHTML = `<div class="ph"><span></span></div><div class="name"><b></b><span class="off hidden">muted</span></div>`;
-    if (slot === W.slot) { t.classList.add("self"); t.prepend(camVideo); camVideo.play().catch(() => {}); } else t.prepend(document.createElement("img"));
+    if (slot === W.slot) { t.classList.add("self"); t.prepend(camVideo); camVideo.play().catch(() => {}); }
+    else if (info.livekit) { const v = document.createElement("video"); v.className = "remote"; v.autoplay = true; v.playsInline = true; t.prepend(v); }
+    else t.prepend(document.createElement("img"));
   }
   if (LAB && slot > 0) {
     const l = document.createElement("div");
@@ -218,9 +235,10 @@ function renderTiles(m) {
     t.querySelector(".name b").textContent = p.slot === m.you ? `${p.name} (you)` : p.name;
     t.querySelector(".ph span").textContent = (p.name[0] || "?").toUpperCase();
     t.querySelector(".off").classList.toggle("hidden", p.mic !== false);
-    if (p.slot === m.you) t.classList.toggle("has-video", camOn && !!stream.getVideoTracks().length);
+    if (p.slot === m.you) t.classList.toggle("has-video", camOn && (info.livekit ? !!camVideo?.srcObject : !!stream?.getVideoTracks().length));
     else { t.dataset.cam = p.cam !== false ? "1" : ""; if (p.cam === false) t.classList.remove("has-video"); }
   }
+  if (info.livekit && lkRoom) attachLiveKitTracks();
   fit();
 }
 
@@ -268,15 +286,19 @@ function onAiState(m) {
   t.querySelector(".status").textContent = W.ai.status;
   for (const s of ["listening", "thinking", "speaking"]) t.classList.toggle(s, W.ai.status === s);
   t.classList.toggle("idle-on", W.ai.avatar && !!t.querySelector("video.idle").src);
+  if (info.avatar_livekit && joined) { // the live avatar's audio + video come from LiveKit, only while it's on
+    if (W.ai.avatar) connectLiveKit().catch((e) => { W.errors.push(`LiveKit: ${e.message}`); toast(`Avatar: ${e.message}`); });
+    else disconnectLiveKit();
+  }
   if (W.ai.status !== "speaking") setTimeout(() => W.ai.status !== "speaking" && (t.querySelector(".cap").textContent = ""), 4000);
 }
 
-function aiSay(text) {
+function aiSay(text, source, correction) {
   const t = tiles[0];
   clearTimeout(aiSay.timer);
   aiSay.timer = setTimeout(() => W.ai.status !== "speaking" && tiles[0] && (tiles[0].querySelector(".cap").textContent = ""), 8000);
   if (t) { t.querySelector(".cap").innerHTML = ""; const s = document.createElement("span"); s.textContent = text; t.querySelector(".cap").appendChild(s); }
-  addLine({ slot: 0, name: aiName, text });
+  addLine({ slot: 0, name: aiName, text, source, correction });
 }
 
 // ---------- side panel ----------
@@ -309,11 +331,148 @@ function addLine(m) {
     const rest = Object.entries(d).filter(([k]) => k !== "speak" && k !== "why").map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`);
     extra.append(c, [d.why, ...rest].filter(Boolean).join(" · "));
   }
+  if (m.source || m.correction) {
+    extra = document.createElement("div"); extra.className = "sub";
+    extra.textContent = [m.correction ? "correction" : "", m.source ? `source: ${m.source}` : ""].filter(Boolean).join(" · ");
+  }
   if (m.merge) {  // the same person went on after a pause: their last line becomes the whole line
     const prev = [...$("lines").querySelectorAll("li")].reverse().find((x) => x.dataset.slot === String(m.slot));
     if (prev) prev.remove();
   }
   addItem("lines", m.slot === 0 ? "ai" : "", m.name || "", m.text, extra, m.slot);
+}
+
+function setHumanGain(value, reason = "") {
+  const gain = Math.max(0, Math.min(1, Number(value)));
+  W.humanGain = gain;
+  for (const [key, el] of lkAudio) if (key.startsWith("human-")) el.volume = gain;
+  if (mixer) for (let slot = 1; slot <= 5; slot++) mixer.port.postMessage({ gain, slot, ramp: 0.08 });
+  if (gain < 1 && reason === "fact_correction") toast(`${aiName} is correcting a verified fact`, "mode");
+}
+
+// ---------- LiveKit media ----------
+function disconnectLiveKit() {
+  if (lkRoom) { const r = lkRoom; lkRoom = null; r.disconnect().catch(() => {}); }
+  for (const [, el] of lkAudio) el.remove(); lkAudio.clear();
+  tiles[0]?.classList.remove("av-on");
+}
+
+// Subscribe-only: the page watches the avatar. A failed or dropped connection is cleaned up and retried while the
+// avatar is on (a half-connected room used to block every later attempt).
+async function connectLiveKit() {
+  if (!info.avatar_livekit || left || lkRoom) return;
+  if (lkConnecting) return lkConnecting;
+  let room = null;
+  lkConnecting = (async () => {
+    if (!window.LivekitClient) throw new Error("the LiveKit browser SDK did not load");
+    const response = await fetch(`/api/rooms/${encodeURIComponent(RID)}/livekit-token`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pid, name: myName, passcode }),
+    });
+    const credentials = await response.json();
+    if (!response.ok) throw new Error(credentials.error || `token request failed (${response.status})`);
+    lkCred = credentials;
+    const { Room, RoomEvent, Track } = LivekitClient;
+    room = new Room({ adaptiveStream: true, disconnectOnPageLeave: true });
+    room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => attachLiveKitTrack(track, publication, participant));
+    room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => detachLiveKitTrack(track, publication, participant));
+    room.on(RoomEvent.ParticipantConnected, () => setTimeout(attachLiveKitTracks, 0));
+    room.on(RoomEvent.ParticipantDisconnected, (participant) => {
+      for (const [key, el] of lkAudio) if (key.startsWith(`${participant.identity}:`)) { el.remove(); lkAudio.delete(key); }
+    });
+    room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+      for (const slot in tiles) setLevel(+slot, 0);
+      for (const participant of speakers) {
+        const person = W.roster?.people.find((p) => p.identity === participant.identity);
+        if (person) setLevel(person.slot, 0.65);
+        else if (participant.identity === credentials.agent_identity || participant.identity === credentials.avatar_identity) setLevel(0, 0.65);
+      }
+    });
+    room.on(RoomEvent.Disconnected, () => {
+      if (lkRoom !== room) return; // we disconnected it on purpose
+      lkRoom = null;
+      for (const [, el] of lkAudio) el.remove(); lkAudio.clear();
+      if (!left && W.ai.avatar) { toast("Avatar connection lost, reconnecting…", "mode"); setTimeout(() => connectLiveKit().catch(() => {}), 2000); }
+    });
+    room.on(RoomEvent.AudioPlaybackStatusChanged, () => {
+      if (!room.canPlaybackAudio) toast("Click anywhere in the call to enable audio", "mode");
+    });
+    await room.connect(credentials.url, credentials.token, { autoSubscribe: true });
+    if (left || !W.ai.avatar) { room.disconnect().catch(() => {}); return; } // turned off while connecting
+    lkRoom = room;
+    attachLiveKitTracks();
+    await unlockLiveKitAudio();
+  })();
+  try { await lkConnecting; }
+  catch (e) { if (room && lkRoom !== room) room.disconnect().catch(() => {}); throw e; }
+  finally { lkConnecting = null; }
+}
+
+async function unlockLiveKitAudio() {
+  if (!lkRoom) return;
+  try { await lkRoom.startAudio(); } catch {}
+  for (const [, el] of lkAudio) {
+    el.muted = false;
+    el.volume = el.dataset.livekitAudio?.startsWith("human-") ? W.humanGain : 1;
+    try { await el.play(); } catch {}
+  }
+}
+
+function attachLiveKitTracks() {
+  if (!lkRoom) return;
+  const { Track } = LivekitClient;
+  for (const publication of lkRoom.localParticipant.trackPublications.values()) {
+    if (publication.source === Track.Source.Camera && publication.track && camVideo) {
+      publication.track.attach(camVideo);
+      camVideo.muted = true;
+      tiles[W.slot]?.classList.toggle("has-video", camOn);
+    }
+  }
+  for (const participant of lkRoom.remoteParticipants.values()) {
+    for (const publication of participant.trackPublications.values()) {
+      if (publication.track) attachLiveKitTrack(publication.track, publication, participant);
+    }
+  }
+}
+
+function attachLiveKitTrack(track, publication, participant) {
+  if (!W.roster) return;
+  const { Track } = LivekitClient;
+  const person = W.roster.people.find((p) => p.identity === participant.identity);
+  const isAgent = participant.identity === lkCred?.agent_identity;
+  const isAvatar = participant.identity === lkCred?.avatar_identity;
+  if (isAgent) return; // only the avatar's tracks are for us
+  if (track.kind === Track.Kind.Audio) {
+    const key = `${participant.identity}:${publication.trackSid}`;
+    if (!lkAudio.has(key)) {
+      const el = track.attach();
+      el.autoplay = true; el.muted = false;
+      el.volume = participant.identity.startsWith("human-") ? W.humanGain : 1;
+      el.dataset.livekitAudio = key; el.style.display = "none";
+      $("call").appendChild(el); lkAudio.set(key, el);
+      el.play?.().catch(() => toast("Click anywhere in the call to enable audio", "mode"));
+    }
+    return;
+  }
+  if (track.kind !== Track.Kind.Video) return;
+  if (isAvatar) {
+    const tile = tiles[0], video = tile?.querySelector("video.live");
+    if (video) { track.attach(video); video.muted = true; video.play().catch(() => {}); tile.classList.add("av-on"); W.avatar.starts++; }
+  } else if (person) {
+    const tile = tiles[person.slot], video = tile?.querySelector("video.remote");
+    if (video) { track.attach(video); video.play().catch(() => {}); tile.classList.add("has-video"); bump(W.videoRx, person.slot); }
+  } else if (!isAgent) {
+    W.errors.push(`Unknown LiveKit participant ${participant.identity}`);
+  }
+}
+
+function detachLiveKitTrack(track, publication, participant) {
+  const key = `${participant.identity}:${publication.trackSid}`;
+  const audio = lkAudio.get(key);
+  if (audio) { track.detach(audio); audio.remove(); lkAudio.delete(key); }
+  if (participant.identity === lkCred?.avatar_identity) tiles[0]?.classList.remove("av-on");
+  const person = W.roster?.people.find((p) => p.identity === participant.identity);
+  if (person) tiles[person.slot]?.classList.remove("has-video");
 }
 
 // ---------- video socket ----------
@@ -499,15 +658,22 @@ document.addEventListener("keydown", (e) => {
 
 // ---------- controls ----------
 const send = (o) => { if (!ws || ws.readyState !== 1) return false; ws.send(JSON.stringify(o)); return true; };
-$("mic").onclick = () => {
+$("mic").onclick = async () => {
   muted = !muted;
   $("mic").textContent = muted ? "Unmute" : "Mute"; $("mic").classList.toggle("on", muted);
+  if (info.livekit && lkRoom) {
+    try { await lkRoom.localParticipant.setMicrophoneEnabled(!muted, LK_MIC_OPTIONS); }
+    catch (e) { toast(`Microphone: ${e.message}`); }
+  }
   send({ type: "mic", on: !muted });
 };
-$("cam").onclick = () => {
-  if (!stream.getVideoTracks().length) { toast("No camera"); return; }
+$("cam").onclick = async () => {
+  if (!info.livekit && !stream?.getVideoTracks().length) { toast("No camera"); return; }
   camOn = !camOn;
-  stream.getVideoTracks().forEach((t) => (t.enabled = camOn));
+  if (info.livekit && lkRoom) {
+    try { await lkRoom.localParticipant.setCameraEnabled(camOn); attachLiveKitTracks(); }
+    catch (e) { camOn = false; toast(`Camera: ${e.message}`); }
+  } else stream.getVideoTracks().forEach((t) => (t.enabled = camOn));
   $("cam").textContent = camOn ? "Camera off" : "Camera on"; $("cam").classList.toggle("on", !camOn);
   tiles[W.slot]?.classList.toggle("has-video", camOn);
   send({ type: "cam", on: camOn });
@@ -515,7 +681,11 @@ $("cam").onclick = () => {
 const flipMode = () => send({ type: "set_mode", mode: W.ai.mode === "improved" ? "default" : "improved" });
 $("modesw").onclick = flipMode;
 $("modesw").onkeydown = (e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); flipMode(); } };
-$("avatar").onclick = () => send({ type: "set_avatar", on: !W.ai.avatar });
+$("avatar").onclick = async () => {
+  await unlockLiveKitAudio();
+  send({ type: "set_avatar", on: !W.ai.avatar });
+};
+$("call").addEventListener("pointerdown", () => unlockLiveKitAudio(), { passive: true });
 $("invite").onclick = () => {
   const url = `${location.origin}/r/${encodeURIComponent(RID)}${passcode ? `?k=${encodeURIComponent(passcode)}` : ""}`;
   const ok = () => toast("Invite link copied");
@@ -535,6 +705,8 @@ function leaveCall(msg) {
   left = true; joined = false;
   if (ws) ws.onmessage = null; // frames still in flight would reach the closed mixer
   try { ws && ws.close(1000); vws && vws.close(1000); } catch {}
+  if (lkRoom) { lkRoom.disconnect().catch(() => {}); lkRoom = null; }
+  for (const [, el] of lkAudio) el.remove(); lkAudio.clear();
   for (const s in tiles) { tiles[s].remove(); delete tiles[s]; }
   W.roster = null;
   stopMedia();

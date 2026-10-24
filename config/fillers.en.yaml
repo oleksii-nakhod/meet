@@ -1,0 +1,28 @@
+# What a listener may say while the AI is talking without stopping it (F2), and what stops it at once.
+# Quote yes/no/true/on/off: bare, YAML reads them as booleans.
+# Matching is on lowercased words with punctuation removed; any repeat or mix of these words counts
+# ("umm okay yeah yeah"). Elongations are normalised first: "ummmm" -> "umm", "ahhh" -> "ahh", "sooo" -> "so".
+
+# Hesitation sounds: never a request.
+fillers: [um, umm, uh, uhh, uhm, er, erm, err, ah, ahh, eh, hm, hmm, mm, mmm, mhm, huh, oh, ooh, well, like, so]
+
+# Acknowledgements and listener noises (backchannels): "I'm following, go on".
+backchannels: [mm-hm, mmhm, uh-huh, uhhuh, aha, okay, ok, k, yeah, yea, "yes", yep, yup, right, sure, cool, nice,
+  wow, "true", exactly, totally, absolutely, definitely, alright, all, got, it, gotcha, i, see, makes, sense, fair,
+  enough, interesting, great, good, perfect, thanks, thank, you, ha, haha, lol, indeed, agreed, correct]
+
+# Multi-word acknowledgements that would otherwise read as content ("I see", "got it", "makes sense").
+backchannel_phrases: ["i see", "got it", "makes sense", "fair enough", "thank you", "all right", "sounds good",
+  "go on", "go ahead", "keep going", "i know", "for sure", "of course", "that's right", "that's true", "oh nice",
+  "oh wow", "oh okay", "oh really", "no way", "uh huh"]
+
+# Stops the AI immediately, said alone or with its name ("Higgs, stop").
+stop_phrases: ["stop", "stop talking", "stop it", "wait", "wait wait", "hold on", "hang on", "hold up", "one sec",
+  "one second", "one moment", "just a sec", "shh", "shush", "quiet", "be quiet", "enough", "sorry", "excuse me",
+  "pause", "no no", "no stop", "actually", "let me", "can i", "sorry to interrupt"]
+
+# Thresholds (seconds / words)
+min_content_words: 2        # this many words that are not fillers/backchannels = a real interruption
+long_speech_s: 1.4          # speech this long that STT could not transcribe at all = treat as an interruption
+probe_first_s: 0.35         # first transcription of a listener's barge-in after this much speech
+probe_every_s: 0.3          # then again every this often while they keep talking

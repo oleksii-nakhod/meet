@@ -117,6 +117,25 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
 .chip { display: inline-block; font-size: 11px; font-weight: 650; border-radius: 99px; padding: 0 7px; margin-right: 6px; border: 1px solid var(--line); color: var(--muted); }
 .chip.speak { color: var(--ok); border-color: var(--ok); }
 #chatform { display: flex; gap: 8px; padding: 10px 14px 12px; border-top: 1px solid var(--line); }
+#kbbox { padding: 6px 14px; border-top: 1px solid var(--line); max-height: 45vh; overflow: auto; }
+#kbbox summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+#kbbox input, #kbbox textarea { width: 100%; font: inherit; font-size: 13px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+.kb { font-size: 14px; }
+.kb button { width: auto; margin-top: 0; padding: 7px 12px; font-size: 14px; border-radius: 9px; }
+.kb .row2 { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+.kb .row2 input { flex: 1; }
+.kb .drop { border: 2px dashed var(--line); border-radius: 12px; padding: 16px; text-align: center; color: var(--muted); }
+.kb .drop.over { border-color: var(--accent); color: var(--accent); }
+.kb ul { list-style: none; padding: 0; margin: 10px 0 0; }
+.kb .doclist li { display: flex; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.kb .factlist li { display: flex; gap: 6px; align-items: center; padding: 3px 0; }
+.kb .factlist .src { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.kb .pill { font-size: 12px; padding: 1px 8px; border-radius: 99px; border: 1px solid currentColor; color: var(--muted); }
+.kb .pill.good { color: #4cc185; } .kb .pill.bad { color: var(--danger); } .kb .pill.warn { color: #e0a84a; }
+.kb .danger { background: transparent; color: var(--danger); border: 1px solid var(--line); padding: 4px 9px; }
+.kb .grow { flex: 1; } .kb .empty { color: var(--muted); }
+.kb h2 { font-size: 15px; margin: 16px 0 4px; } .kb details summary { cursor: pointer; color: var(--muted); margin-top: 10px; }
+
 #chatform button { padding: 8px 14px; }
 
 /* controls */
@@ -183,6 +202,7 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
     <aside id="side">
       <h3>Transcript · what Higgs heard and decided</h3>
       <ul id="lines"><li class="empty">Lines appear here as Higgs hears them.</li></ul>
+      <details id="kbbox"><summary>Knowledge base · documents and facts</summary><div class="kb" id="kb"></div></details>
       <h3>Chat</h3>
       <ul id="chat"><li class="empty">No messages yet.</li></ul>
       <form id="chatform" autocomplete="off"><input id="chatin" maxlength="2000" placeholder="Message everyone"><button>Send</button></form>
@@ -201,6 +221,7 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
 </section>
 <div id="toasts"></div>
 <script src="/agendas.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.5.7/dist/livekit-client.umd.min.js"></script>
 <script src="/room.js"></script>
 </body>
 </html>

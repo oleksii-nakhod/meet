@@ -18,9 +18,13 @@ import threading
 import time
 from collections import deque
 
+from kb import Library
+from meet_config import livekit_configured
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(HERE, "out", "rooms")
 MAX_HUMANS = 5
+LIBRARY = Library(__import__("pathlib").Path(HERE) / "data" / "kb")  # one knowledge base per room, on disk
 FRAME = 960  # 20 ms of int16 at 24 kHz
 
 if os.environ.get("MEET_AGENT") == "stub":  # the call-layer tests: no Higgs calls
@@ -29,7 +33,7 @@ else:
     try:
         from agent import HiggsAgent
     except ImportError as e:
-        print(f"agent.py not usable ({e}); using stub_agent", flush=True)
+        print(f"\n*** agent.py not usable ({e}): running the STUB agent, there is NO AI in calls. ***\n", flush=True)
         from stub_agent import HiggsAgent
 
 
@@ -134,13 +138,14 @@ LOGGER = _Logger()
 class Human:
     def __init__(self, pid, name, slot, ws):
         self.pid, self.name, self.slot = pid, name, slot
+        self.livekit_identity = f"human-{pid}"
         self.out = Out(ws)
         self.cam, self.mic = True, True
         self.video = None  # Out of this person's /ws/video socket
 
 
 class Room:
-    def __init__(self, title, ai="Higgs", setting="", facts=(), passcode="", agenda="", rid=None):
+    def __init__(self, title, ai="Higgs", setting="", facts=(), passcode="", agenda="", mode="default", rid=None):
         self.id = rid or secrets.token_urlsafe(8)
         self.passcode = passcode or ""
         # a script from web/agendas.js for the people to read from; the agent never sees it (only the brief), and
@@ -148,7 +153,8 @@ class Room:
         self.agenda, self.script_step = agenda or "", 0
         self.brief = {"title": title or "Meeting", "ai": ai or "Higgs", "setting": setting or "",
                       "facts": [f for f in facts if f]}
-        self.mode, self.avatar, self.status = "default", False, "listening"
+        self.mode = mode if mode in ("default", "improved") else "default"
+        self.avatar, self.status = False, "listening"
         self.humans = {}  # slot -> Human
         self.last_slot = {}  # pid -> slot it had, so a reconnect gets the same tile back
         self.idle_url = None
@@ -156,6 +162,20 @@ class Room:
         os.makedirs(LOG_DIR, exist_ok=True)
         self.log_path = os.path.join(LOG_DIR, f"{self.id}.jsonl")
         self._started, self._life, self.errors = False, asyncio.Lock(), 0
+        # People's media always uses the WebSocket. LiveKit is used only for the live avatar, and only while it is on
+        # (it used to carry everyone's microphone and camera whenever it was configured).
+        self.livekit = False
+        self.avatar_livekit = livekit_configured()
+        if self.avatar_livekit:
+            try:
+                import livekit_transport  # noqa: F401
+            except ImportError as e:
+                print(f"LiveKit packages unavailable ({e}): the live avatar is off", flush=True)
+                self.avatar_livekit = False
+        self.livekit_bridge = None   # created when the avatar is turned on
+        self.kb = LIBRARY.get(self.id)
+        if self.brief["facts"] and not self.kb.facts():
+            self.kb.set_facts(self.brief["facts"])
         self.agent = HiggsAgent(self)
         self.log({"type": "created", **self.brief, "passcode": bool(self.passcode), "agenda": self.agenda})
 
@@ -163,16 +183,28 @@ class Room:
     def people(self):
         return [{"slot": h.slot, "name": h.name} for h in sorted(self.humans.values(), key=lambda h: h.slot)]
 
+    def avatar_live(self):
+        b = self.livekit_bridge
+        return bool(self.avatar and b is not None and b.connected and b.to_avatar is not None)
+
     async def send_ai_audio(self, pcm: bytes):
+        if self.avatar_live():  # the avatar speaks it (browsers get its synchronized audio + video from LiveKit)
+            await self.livekit_bridge.send_ai_audio(pcm)
+            return
         b = b"\x00" + bytes(pcm)
         for h in list(self.humans.values()):
             h.out.lossy(b)
 
     async def ai_flush(self):
+        if self.livekit_bridge:
+            await self.livekit_bridge.flush_audio()
         self._all({"type": "ai_flush"})
 
     async def ai_gain(self, g):
-        self._all({"type": "ai_gain", "gain": max(0.0, min(1.0, float(g)))})
+        gain = max(0.0, min(1.0, float(g)))
+        if self.livekit_bridge:
+            self.livekit_bridge.gain = gain
+        self._all({"type": "ai_gain", "gain": gain})
 
     async def event(self, d: dict):
         """Broadcast a JSON event to every human (and log it). An ai_state event also updates room.mode/avatar/status."""
@@ -180,9 +212,39 @@ class Room:
             self.mode, self.avatar = d.get("mode", self.mode), bool(d.get("avatar", self.avatar))
             self.status = d.get("status", self.status)
             d = {**d, **self.ai_state()}
+            if self.livekit_bridge:
+                await self.livekit_bridge.on_ai_status(self.status)
         if d.get("type") != "lab":
             self.log(d)
         self._all(d)
+
+    async def end_ai_segment(self):
+        """A reply has no more audio: the avatar (if on) plays it out and then reports it heard."""
+        if self.avatar_live():
+            await self.livekit_bridge.end_segment()
+
+    def playout(self):
+        """(seconds of audio still in flight after the last frame was sent, an Event set when it was heard or None).
+        The avatar reports playback; a browser over the WebSocket can't, so its jitter buffer is estimated."""
+        if self.avatar_live():
+            return 4.0, self.livekit_bridge.heard
+        return 0.3, None
+
+    async def set_live_avatar(self, on):
+        """Start or stop the Boson avatar over LiveKit. Raises if it can't start (the bridge is cleaned up)."""
+        if on and self.livekit_bridge is None:
+            from livekit_transport import LiveKitBridge
+            bridge = LiveKitBridge(self)
+            try:
+                await bridge.start()
+                await bridge.set_avatar(True)
+            except Exception:
+                await bridge.stop()
+                raise
+            self.livekit_bridge = bridge
+        elif not on and self.livekit_bridge is not None:
+            bridge, self.livekit_bridge = self.livekit_bridge, None
+            await bridge.stop()
 
     async def ai_status(self, status):
         await self.event({"type": "ai_state", "status": status})
@@ -220,7 +282,8 @@ class Room:
                 h.video.send(item)
 
     def roster(self):
-        people = [{"slot": h.slot, "name": h.name, "cam": h.cam, "mic": h.mic}
+        people = [{"slot": h.slot, "name": h.name, "cam": h.cam, "mic": h.mic,
+                   "identity": h.livekit_identity}
                   for h in sorted(self.humans.values(), key=lambda h: h.slot)]
         ai = {"name": self.brief["ai"], "mode": self.mode, "avatar": self.avatar, "status": self.status}
         for h in list(self.humans.values()):
@@ -237,6 +300,9 @@ class Room:
 
     def by_pid(self, pid):
         return next((h for h in self.humans.values() if h.pid == pid), None)
+
+    def by_livekit_identity(self, identity):
+        return next((h for h in self.humans.values() if h.livekit_identity == identity), None)
 
     def join(self, pid, name, ws):
         """Add a human (or replace their old connection on reconnect). Returns the Human, or None if the room is full."""
@@ -287,14 +353,19 @@ class Room:
             try:
                 if self.humans and not self._started:
                     self._started = True
+                    if self.avatar and self.avatar_livekit:
+                        await self.set_live_avatar(True)
                     await self.agent.start()
                 elif not self.humans and self._started:
                     self._started = False
                     await self.agent.stop()
+                    await self.set_live_avatar(False)
             except Exception as e:
                 self.log({"type": "agent_error", "where": "lifecycle", "error": repr(e)})
 
     def on_audio(self, h, pcm):
+        if self.livekit:
+            return  # microphone media arrives through LiveKit
         if len(pcm) != FRAME:
             return
         b = bytes([h.slot]) + pcm
@@ -315,7 +386,14 @@ class Room:
             await self.event({**self.ai_state(), "by": h.name})
             self._safe(self.agent.set_mode, self.mode)
         elif t == "set_avatar":
-            self.avatar = bool(m.get("on"))
+            desired = bool(m.get("on"))
+            if self.avatar_livekit:
+                try:
+                    await self.set_live_avatar(desired)
+                except Exception as e:
+                    desired = False
+                    await self.event({"type": "ai_error", "error": f"live avatar: {e!r}"[:300]})
+            self.avatar = desired
             await self.event({**self.ai_state(), "by": h.name})
             self._safe(self.agent.set_avatar, self.avatar)
         elif t == "script" and isinstance(m.get("step"), int) and 0 <= m["step"] < 1000:

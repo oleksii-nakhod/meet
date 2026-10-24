@@ -6,6 +6,15 @@ requests
 websockets
 fastapi
 uvicorn
+aiohttp>=3.11,<4
+certifi
+livekit-agents>=1.8,<2
+# knowledge base (documents) and the filler lists
+pyyaml
+pypdf
+python-docx
+python-multipart
+# optional: the local turn-taking models (without torch + maai they are simply off)
 torch
 # maai's runtime deps
 einops

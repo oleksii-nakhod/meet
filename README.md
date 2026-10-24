@@ -6,6 +6,38 @@ Higgs decides *whether* to speak (it stays out of conversations between people, 
 wrong facts) and *when* (it waits out thinking pauses, keeps talking through a listener's "mm-hm", stops for a real
 interruption). A switch on the call flips between the two so the difference can be heard live.
 
+## junaid3: what changed
+
+* **Knowledge base.** After creating a room (and in the call's side panel), upload PDF, DOCX, MD, TXT, CSV or HTML,
+  add a link or paste text. Documents are indexed (SQLite FTS5, `data/kb/`), key facts are extracted into a fact
+  sheet you can edit, replies are grounded in the documents and show their source.
+* **Verified corrections.** Every claim-like line is checked beside the conversation (`fact_monitor.py`) against the
+  fact sheet, the documents and what other people said earlier ("the plumber is coming Friday", Jordan, earlier).
+  A correction needs cited evidence that really exists in its source, confidence >= 0.8 and a 20 s cooldown. It cuts
+  in, ducks everyone else, holds the floor for 2 s (`MEET_CORRECTION_GUARD`), then yields only to someone who keeps
+  interrupting; what was said over it is answered afterwards.
+* **Immediate corrections, mid-sentence.** While someone talks, every ~1 s of new speech (`MEET_MIDCHECK_EVERY`)
+  what they've said so far is transcribed and checked against everything: the documents, the fact sheet, what others
+  said, and well-established general knowledge (`MEET_GENERAL_FACTS`; "the Earth is flat"). A confirmed error cuts in
+  at once, ~1.5 s after the wrong words, while they keep talking (live: 7.6-8 s before they finished), and plays to
+  the end: the corrected person carrying on doesn't stop it, only someone who starts pushing back after the 2 s guard
+  does. General-knowledge errors have no document to quote, so they need confidence >= 0.9 and a second, independent
+  check agreeing.
+* **Fast, filler-proof interruptions.** While Higgs talks, a listener's speech is re-transcribed every ~0.3 s on a
+  probe session: "umm", "okay", "mm-hm" never stop it; a real interruption does (0.45 s live).
+* **Noise gate** on each person's speech detector (`noise_gate.py`, `MEET_NOISE_GATE`).
+* **LiveKit only for the avatar.** People's audio and video always use the WebSocket; LiveKit starts when the avatar
+  is turned on (browsers subscribe to the avatar only) and stops when it is turned off.
+* **Audit fixes** (MEET_RUNTIME_AUDIT.md): no silent stub when torch/faster-whisper are missing (those features just
+  switch off; `/api/config` says which agent runs); a judge's guess is never a "verified" correction; fact checks
+  can't hold up answers; the audio loop is supervised; the voice fallback never rewinds; the floor and ducking are
+  released when audio was heard, not sent; per-room avatar identities; pools rebuilt only when needed; shutdown
+  cancels all work; the browser recovers from failed avatar connections; `.env` keeps `MEET_*` settings.
+* From `main`: the fixed meeting link (`MEET_ROOM`) and the room-loop timing fix.
+
+Tests: `BOSON_API_KEY=unused python -m pytest tests/test_*.py` (offline, 144 tests);
+`python tests/live_junaid3.py` (7 live scenarios against Boson; `--only l6` for the avatar); `./run.sh check`.
+
 ## Setup
 
     python3.12 -m venv .venv && . .venv/bin/activate
@@ -29,6 +61,29 @@ The models download from Hugging Face on first use. `ffmpeg` is needed only to r
     ./run.sh check                              # 6 interactive scenes against real Higgs (~3 min)
 
 `./run.sh` is `python server.py --port 8600` with the venv's Python.
+
+### LiveKit media and live avatar
+
+When `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` are set, Meet automatically uses LiveKit for
+microphone, camera, participant playback, and the AI's output track. The existing WebSocket remains the control plane
+for roster, chat, transcripts, scripts, and mode switches. Turning **Avatar on** starts a Boson realtime avatar session
+in the same LiveKit room; the avatar publishes synchronized audio and video as the `boson-avatar` participant.
+
+Copy `.env.example` to `.env`, fill in the four credentials, and run normally. With any LiveKit variable missing,
+Meet falls back to its original raw-PCM/JPEG WebSocket media transport and rendered-video avatar.
+
+In **improved** mode, a contradiction confirmed by the existing majority fact checker becomes an active intervention:
+it bypasses the normal wait-for-silence rule, speaks the correction immediately, and broadcasts a temporary human-audio
+gain so every listener ducks other people while Higgs talks. `MEET_PROACTIVE_FACTS=0` disables this behaviour;
+`MEET_FACT_DUCK_GAIN` sets the human playback level during a correction (default `0.18`). Nobody's microphone is muted:
+speech received during the correction remains in that person's utterance buffer, then is transcribed and handled after
+the correction releases the floor.
+
+Improved mode now confirms ordinary interruptions from the transcription. Repeated acknowledgements and filler
+sounds ("umm", "ahh", "okay", "yeah", "mm-hm") keep Higgs speaking at full volume; they neither cancel playback nor
+replace a pending answer. A substantive utterance or explicit "stop talking" can interrupt an ordinary reply once
+its words have been transcribed. That adds the clause-ending pause and STT delay to a genuine interruption, but
+does not depend on the optional local turn-taking models. Fact corrections retain their protected floor.
 
 ## Layout
 
@@ -73,19 +128,10 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
     goes back to TTS 3 sentence by sentence, which starts on the draft's first sentence: without the face, replies
     were heard ~0.2–0.3 s sooner that way (`./run.sh check`, 2026-10-23: ~1.3–1.4 s vs ~1.6–1.7 s after the line).
   - **Taking the floor:** a reply starts only when the room has been quiet for 0.35 s and nobody who just spoke
-    still holds the floor. It is dropped if someone spoke after its line, or if it couldn't start within 3.5 s while
-    people kept talking (8 s in a quiet room). Every reply that was decided but not spoken logs `reply_skipped`.
-  - **While Higgs talks:** a listener's "mm-hm" only ducks it. A real interruption stops it, and Higgs remembers
-    only what was heard (`floor.py`, ported from `mmhm/engine.py`; 16 unit tests).
-  - **Barging in on a wrong fact** (`MEET_BARGE`, on by default): corrections don't wait for the floor. While someone
-    talks, what they've said so far is transcribed locally (faster-whisper) every 0.8 s of speech (`MEET_BARGE_EVERY`)
-    and fact-checked, with the correction drafted alongside; when every check says it contradicts the fact sheet,
-    Higgs cuts in mid-sentence ("Wait, Alex, submissions close Saturday at 3 pm, not Sunday."), about 0.5 s after the
-    check. Any correction then plays over whoever is talking and holds the floor: talking over it doesn't duck or
-    stop it (only 5 s of unbroken speech does, `MEET_HOLD_MAX`). When the cut-in line ends, the whole line replaces
-    its fragment and isn't corrected again. Live (`tests/scenarios.py --set 8`): cut in 3.1–6.0 s before the wrong
-    line ended, kept going for 4.7 s while talked over, and didn't cut in on a long correct line (8 checks, all
-    false); `./run.sh check` unchanged (19/19). `MEET_BARGE=0` restores waiting for a gap and yielding.
+    still holds the floor. A newer substantive line can replace it; microphone activity and acknowledgements alone
+    no longer expire a directly addressed answer. Unaddressed replies expire after eight seconds.
+  - **While Higgs talks:** listener acknowledgements keep playback at full volume. A transcribed substantive
+    interruption stops an ordinary reply, and Higgs remembers only what was heard.
 - **Avatar** (both modes, off by default; the face is the uncropped Boson docs portrait). Improved: a reply is voiced
   by the Realtime reader as without the face (its whole speech exists sooner than with TTS 3: ~1.5 s vs ~2.0 s
   for one sentence, ~2.7 s vs ~5.7 s for three; TTS 3 takes over if Realtime hasn't started within 2 s), Higgs Avatar

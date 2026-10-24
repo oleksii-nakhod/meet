@@ -179,7 +179,7 @@ SCENARIOS6 = [  # accents (cloned voice-library voices): the same scenes, other 
         ("talk_over", "Alex", LONG_Q, ("Priya", "Mm-hm."), "continue")]),
 ]
 
-# Barging in on a wrong fact (agent.BARGE): Higgs should cut in while the wrong line is still being said, keep its
+# Barging in on a wrong fact (MEET_MIDCHECK): Higgs should cut in while the wrong line is still being said, keep its
 # correction going when talked over, and not cut in on a long line that is right. expect "cut_in": Higgs's voice starts
 # before the line ends and its correction isn't stopped.
 SCENARIOS8 = [

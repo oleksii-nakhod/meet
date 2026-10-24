@@ -3,8 +3,10 @@ import asyncio
 import base64
 import json
 import os
+import ssl
 import time
 
+import certifi
 import numpy as np
 import requests
 import soundfile as sf
@@ -34,6 +36,7 @@ BASE = "https://api.boson.ai/v1"
 WS = "wss://api.boson.ai/v1/realtime?model=higgs-realtime"
 HDR = {"Authorization": f"Bearer {KEY}"}
 SR = 24000
+TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 
 def outdir(name):
@@ -124,7 +127,7 @@ class Session:
     async def _open(self, attempts):
         for k in range(attempts):
             self.events, self.audio, self._waiters, self.close_code = [], {}, [], None
-            self.ws = await websockets.connect(WS, additional_headers=HDR, max_size=None)
+            self.ws = await websockets.connect(WS, additional_headers=HDR, ssl=TLS_CONTEXT, max_size=None)
             self.t0 = time.perf_counter()
             self.reader = asyncio.create_task(self._read())
             # Higgs sends nothing until the client speaks first; the first session.update is answered with
