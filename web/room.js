@@ -320,8 +320,10 @@ function addLine(m) {
     const rest = Object.entries(d).filter(([k]) => k !== "speak" && k !== "why").map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`);
     extra.append(c, [d.why, ...rest].filter(Boolean).join(" · "));
   }
-  if (m.merge) {  // the same person went on after a pause: their last line becomes the whole line
-    const prev = [...$("lines").querySelectorAll("li")].reverse().find((x) => x.dataset.slot === String(m.slot));
+  if (m.merge || m.moved_from != null) {  // they went on after a pause: their last line becomes the whole line;
+    // moved_from: the line was taken as someone else's (their mic heard it too, quieter): it moves to who said it
+    const from = String(m.moved_from ?? m.slot);
+    const prev = [...$("lines").querySelectorAll("li")].reverse().find((x) => x.dataset.slot === from);
     if (prev) prev.remove();
   }
   addItem("lines", m.slot === 0 ? "ai" : "", m.name || "", m.text, extra, m.slot);

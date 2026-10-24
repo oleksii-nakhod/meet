@@ -1763,13 +1763,19 @@ class ImprovedBrain:
             if louder:
                 a.room.log({"type": "bleed", "slot": rec["slot"], "text": rec["text"][:80], "why": "louder here",
                             "to": li.name, "db": [round(rec["db"], 1), round(db, 1)]})
+                old = rec["slot"]
                 self._reattribute(rec, li)
+                if rec["shown"]:  # already on the transcript panel under the other person: move it
+                    owed = any(r is not None and r.line_id == rec["line"] for r in (self.pending, self.playing))
+                    await a.line(li.slot, li.name, rec["text"], {"speak": owed, "why": "louder on this mic"},
+                                 moved_from=old)
                 return
             if quieter or (same and not louder):
                 a.room.log({"type": "bleed", "slot": li.slot, "text": text[:80], "why": "quieter" if quieter else "same words",
                             "db": None if db is None else round(db, 1)})
                 return
-        rec = {"t": now, "slot": li.slot, "text": text, "db": db, "entry": None, "line": None}
+        rec = {"t": now, "slot": li.slot, "text": text, "db": db, "entry": None, "line": None, "owner": None,
+               "shown": False}
         self.recent.append(rec)
         merged = merge and bool(a.history) and a.history[-1]["speaker"] == li.name
         if merged and cut is None:
@@ -1817,6 +1823,7 @@ class ImprovedBrain:
             cur = rec["entry"] = {"speaker": li.name, "text": text}
             a.history.append(cur)
         if kind:  # "mm-hm", "um", "so the, uh,": part of the meeting, but nothing to answer, and it doesn't make a reply
+            rec["shown"] = True
             if kind != "unfinished":  # someone else is waiting for stale; an unfinished line merges with what follows
                 li.gate.settle()
             if kind == "stop":  # "Higgs, stop!" is too short to count as an interruption while it's said: stop now
@@ -1875,6 +1882,11 @@ class ImprovedBrain:
         if tok is not None and not tok["decided"]:  # decided: a reply waiting on this line may go (or drop)
             tok["decided"] = True
             li.in_flight = max(0, li.in_flight - 1)
+        if rec["owner"] is not None and rec["owner"] is not li:  # a louder copy came while it was judged: theirs
+            li = rec["owner"]
+            if spec:
+                spec.listener = li
+        rec["shown"] = True
         await a.line(li.slot, li.name, text, {"speak": speak, "why": d["why"], "reading": why, "votes": d["votes"],
                                               "checks": d["checks"],
                                               "decided_s": round(time.perf_counter() - t_end, 2)}, merged)
@@ -2229,7 +2241,7 @@ class ImprovedBrain:
         for r in (self.pending, self.playing):
             if r is not None and r.line_id == rec["line"]:
                 r.listener = li
-        rec["slot"], rec["db"] = li.slot, None
+        rec["slot"], rec["db"], rec["owner"] = li.slot, None, li
 
     def _drop_paused(self):
         if self.paused is not None:
@@ -2374,9 +2386,10 @@ class HiggsAgent:
         await self.room.event({"type": "ai_state", "mode": self.mode, "avatar": getattr(self.room, "avatar", False),
                                "status": s, "calls": CALLS["n"], **kw})
 
-    async def line(self, slot, name, text, decision, merge=False):
+    async def line(self, slot, name, text, decision, merge=False, moved_from=None):
         await self.room.event({"type": "line", "slot": slot, "name": name, "text": text, "decision": decision,
-                               "mode": self.mode, **({"merge": True} if merge else {})})
+                               "mode": self.mode, **({"merge": True} if merge else {}),
+                               **({"moved_from": moved_from} if moved_from is not None else {})})
 
     def _brain(self, mode):
         return ImprovedBrain(self) if mode == "improved" else DefaultBrain(self)
