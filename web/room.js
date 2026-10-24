@@ -150,7 +150,7 @@ function onMessage(e) {
   else if (m.type === "ai_state") onAiState(m);
   else if (m.type === "line") addLine(m);
   else if (m.type === "ai_note") toast(m.text, "mode");
-  else if (m.type === "ai_say") aiSay(m.text);
+  else if (m.type === "ai_say") live.video ? setTimeout(() => aiSay(m.text), 1300) : aiSay(m.text); // with the face's words
   else if (m.type === "lab") lab(m);
   else if (m.type === "script") setStep(m.step, false);
 }
@@ -273,6 +273,11 @@ function onAiState(m) {
   b.textContent = MODE_LABEL[W.ai.mode] || W.ai.mode; b.classList.toggle("improved", W.ai.mode === "improved");
   t.querySelector(".status").textContent = W.ai.status;
   for (const s of ["listening", "thinking", "speaking"]) t.classList.toggle(s, W.ai.status === s);
+  if (W.ai.status === "speaking" && prev.status !== "speaking" && live.video) { // the face says it ~1.3 s from now
+    t.classList.add("lk-wait");
+    clearTimeout(onAiState.wait);
+    onAiState.wait = setTimeout(() => t.classList.remove("lk-wait"), 1300);
+  } else if (W.ai.status !== "speaking") t.classList.remove("lk-wait");
   t.classList.toggle("idle-on", W.ai.avatar && !!t.querySelector("video.idle").src);
   if (W.ai.status !== "speaking") setTimeout(() => W.ai.status !== "speaking" && (t.querySelector(".cap").textContent = ""), 4000);
 }

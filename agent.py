@@ -1416,7 +1416,7 @@ class ImprovedBrain:
         if not VOICE_RT:
             return None
         if self.reader is None or self.reader.closed:
-            self.reader = Pool(READER, 1, cfg={"output_modalities": ["audio"], "audio": {"output": {"voice": VOICE}}})
+            self.reader = Pool(READER, 2, cfg={"output_modalities": ["audio"], "audio": {"output": {"voice": VOICE}}})
         return self.reader
 
     def point(self):
