@@ -177,7 +177,9 @@ socket audio. The call itself (people's audio and cameras) stays on Meet's own s
 - **Interruptions:** Meet stops Higgs ~0.5 s into the interruption as before; the avatar's pipeline would still play
   ~1.2 s after that, so pages mute the face's audio at once on `ai_flush` for `drain` (1.25 s) and cover its still
   moving lips with a still of the face listening (taken every second while it's quiet), then show it live again.
-  `ai_gain` (ducking for a "mm-hm") sets its volume.
+  `ai_gain` (ducking for a "mm-hm") sets its volume. `tests/live_cut.py` (2026-10-24, live face on, 2 runs): 16/16 cut-ins
+  stopped Higgs 0.47–0.56 s after they began, 0/8 "Mm-hm." did. Feeding the turn-taking models Higgs's voice delayed by
+  the face's lag, as people hear it (`MEET_LIVE_ALIGN=1`), changed nothing (0.51 s vs 0.49 s), so it is off.
 - **When the avatar goes away** (expired, ended by Boson): the room starts a new session and pages switch to it
   (`tests/live_avatar_recover.py`: the avatar removed from its LiveKit room; pages told in 0.1 s, the new face
   there 1.8 s later and speaking).
