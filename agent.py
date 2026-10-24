@@ -1572,6 +1572,7 @@ class ImprovedBrain:
         self.pending = None       # Reply waiting for the floor
         self.playing = None       # Reply being heard
         self.paused = None        # {r, li, t, pos}: a reply just stopped by li, resumed if li only said "mm-hm" (RESUME)
+        self.corrected = []       # corrections said in this meeting (each one is made once)
         self.last_out = np.zeros(N, np.int16)
         self.gain = 1.0
         self.last_listener = None
@@ -1727,9 +1728,8 @@ class ImprovedBrain:
         ans = await hedged(draft, lambda: self.pools["write"].ask(ask), HEDGE_S)
         ans = re.sub(rf"^\s*{re.escape(a.ai)}\s*:\s*", "", ans.strip().strip('"'), flags=re.I)
         mine = [h["text"] for h in a.history if h["speaker"] == a.ai][-3:]
-        # a question put to the AI (by name, one-to-one) gets its answer even if it's the same as before ("I said,
-        # Higgs, what do you think?"): 14 of 32 repeat skips in the 2026-10-23 calls were direct questions
         skip = ("no draft (Higgs request failed)" if not ans else "repeat" if repeats(ans, mine)
+                else "corrected already" if repeats(ans, self.corrected, 0.6)
                 else "echo" if echoes(ans, text) else "a correction is waiting" if self.correcting() else None)
         if skip:  # nothing was said over them: the whole line is judged when it ends (it was "corrected mid-line")
             if li.cut is frag:
@@ -1978,6 +1978,8 @@ class ImprovedBrain:
         # a question put to the AI (by name, one-to-one) gets its answer even if it's the same as before ("I said,
         # Higgs, what do you think?"): 14 of 32 repeat skips in the 2026-10-23 calls were direct questions
         skip = ("no draft (Higgs request failed)" if not ans else "repeat" if repeats(ans, mine) and not addressed
+                # the same correction again in this meeting (the soak: 5 times in 20 min) is nagging, unless asked
+                else "corrected already" if why.get("wrong") and not addressed and repeats(ans, self.corrected, 0.6)
                 else "someone spoke since" if not correcting and line_id != self.line_no and not (addressed and not any(
                     self.line_by.get(i) == li.slot for i in range(line_id + 1, self.line_no + 1)))
                 else "a correction is waiting" if not correcting and self.pending is not None and self.pending.correction
@@ -2067,6 +2069,8 @@ class ImprovedBrain:
                 act, why = ("drop", "stale") if age > STALE_MAX else ("play", "cut in" if r.barge else "correction")
             if act == "play":
                 self.pending, self.playing = None, r
+                if r.correction:
+                    self.corrected.append(r.text)
                 r.hist_idx = len(self.a.history)
                 self.a.history.append({"speaker": self.a.ai, "text": r.text})
                 li.gate.settle()  # the reply is out: a later word from them is a new line, not a resume
