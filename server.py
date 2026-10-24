@@ -8,12 +8,13 @@
 
 Run: python server.py [--port 8600] [--host 127.0.0.1] [--https]"""
 import argparse
+import asyncio
 import json
 import os
 import secrets
 import sys
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -22,7 +23,16 @@ sys.path.insert(0, HERE)
 from meet_config import livekit_configured, load_environment  # noqa: E402
 
 load_environment()  # must happen before room.py imports the Boson client
+import room as room_module  # noqa: E402
 from room import Room  # noqa: E402
+
+try:
+    import boson_http  # noqa: E402
+    from agent import spend  # noqa: E402
+    MODELS = boson_http.Models(spend=spend)  # the knowledge base extracts facts with it
+except Exception as e:  # noqa: BLE001  (no key / stub agent: documents are still indexed, just no fact extraction)
+    print(f"knowledge-base fact extraction off: {e!r}", flush=True)
+    MODELS = None
 
 WEB = os.path.join(HERE, "web")
 ADMIN = os.environ.get("MEET_ADMIN", "")
@@ -32,7 +42,8 @@ app = FastAPI()
 
 @app.get("/api/config")
 def config():
-    return {"admin_required": bool(ADMIN)}
+    return {"admin_required": bool(ADMIN), "agent": room_module.HiggsAgent.__module__,
+            "avatar_livekit": livekit_configured()}
 
 
 @app.post("/api/rooms")
@@ -63,14 +74,15 @@ def room_info(rid: str):
     if not room:
         return JSONResponse({"error": "no such room"}, status_code=404)
     return {"id": rid, "title": room.brief["title"], "ai": room.brief["ai"], "passcode": bool(room.passcode),
-            "people": len(room.humans), "max": 5, "agenda": room.agenda, "livekit": room.livekit}
+            "people": len(room.humans), "max": 5, "agenda": room.agenda, "livekit": room.livekit,
+            "avatar_livekit": room.avatar_livekit}
 
 
 @app.post("/api/rooms/{rid}/livekit-token")
 async def livekit_token(rid: str, request: Request):
     """Mint one short-lived participant token after the normal Meet join succeeds."""
     room = ROOMS.get(rid)
-    if not room or not room.livekit or not livekit_configured():
+    if not room or not room.avatar_livekit or not livekit_configured():
         return JSONResponse({"error": "LiveKit is not available for this room"}, status_code=404)
     try:
         body = await request.json()
@@ -85,7 +97,72 @@ async def livekit_token(rid: str, request: Request):
     if not pid or human is None:
         return JSONResponse({"error": "join the Meet room first"}, status_code=403)
     from livekit_transport import browser_credentials
-    return browser_credentials(room.livekit_bridge.room_name, pid, name)
+    return browser_credentials(room.id, pid, name)
+
+
+# ---------- knowledge base (documents, links, pasted text; the fact sheet) ----------
+async def _ingest(room, doc_id):
+    await room.kb.ingest(doc_id, MODELS)
+    await room.event({"type": "kb", **room.kb.state()})
+
+
+@app.get("/api/rooms/{rid}/kb")
+def kb_state(rid: str):
+    room = ROOMS.get(rid)
+    if not room:
+        return JSONResponse({"error": "no such room"}, status_code=404)
+    return room.kb.state()
+
+
+@app.post("/api/rooms/{rid}/kb/files")
+async def kb_upload(rid: str, file: UploadFile = File(...)):
+    room = ROOMS.get(rid)
+    if not room:
+        return JSONResponse({"error": "no such room"}, status_code=404)
+    try:
+        doc = room.kb.add_file(file.filename or "upload", await file.read())
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    asyncio.ensure_future(_ingest(room, doc["id"]))
+    return doc
+
+
+@app.post("/api/rooms/{rid}/kb/sources")
+async def kb_source(rid: str, request: Request):
+    room = ROOMS.get(rid)
+    if not room:
+        return JSONResponse({"error": "no such room"}, status_code=404)
+    body = await request.json()
+    try:
+        if body.get("url"):
+            doc = room.kb.add_url(str(body["url"]))
+        elif str(body.get("text") or "").strip():
+            doc = room.kb.add_text(str(body.get("title") or "Pasted text")[:200], str(body["text"])[:500_000])
+        else:
+            raise ValueError("give a url or some text")
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    asyncio.ensure_future(_ingest(room, doc["id"]))
+    return doc
+
+
+@app.delete("/api/rooms/{rid}/kb/docs/{doc_id}")
+async def kb_delete(rid: str, doc_id: str):
+    room = ROOMS.get(rid)
+    if not room:
+        return JSONResponse({"error": "no such room"}, status_code=404)
+    room.kb.delete(doc_id)
+    return {"ok": True}
+
+
+@app.put("/api/rooms/{rid}/kb/facts")
+async def kb_facts(rid: str, request: Request):
+    room = ROOMS.get(rid)
+    if not room:
+        return JSONResponse({"error": "no such room"}, status_code=404)
+    body = await request.json()
+    room.kb.set_facts([str(f).strip()[:500] for f in body.get("facts", []) if str(f).strip()][:200])
+    return room.kb.state()
 
 
 @app.get("/r/{rid}")

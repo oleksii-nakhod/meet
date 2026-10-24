@@ -14,6 +14,7 @@ Every Higgs request is counted (CALLS); above MEET_BUDGET the agent stops asking
 import asyncio
 import base64
 import dataclasses
+import importlib.util
 import os
 import re
 import threading
@@ -23,8 +24,13 @@ from collections import deque
 import numpy as np
 
 import avatar
+import boson_http
+import fact_monitor
 import floor
+import noise_gate
 import third_voice
+import words
+from kb import terms
 from mmhm.engine import INCOMPLETE, N, TICK, Engine, Policy, VAD, to16k
 from mmhm.expressive import SentenceSpeaker
 from mmhm.higgs import SR, Session
@@ -45,7 +51,17 @@ SPECULATE = os.environ.get("MEET_SPECULATE", "1") == "1"  # voice likely replies
 PROMPT = os.environ.get("MEET_PROMPT", "v5")       # judge prompt (see judge_prompt)
 PROACTIVE_FACTS = os.environ.get("MEET_PROACTIVE_FACTS", "1") == "1"  # verified contradictions may take the floor
 FACT_DUCK_GAIN = max(0.0, min(1.0, float(os.environ.get("MEET_FACT_DUCK_GAIN", "0.18"))))
+def _installed(*modules):
+    return all(importlib.util.find_spec(m) is not None for m in modules)
+
+
+# Optional local models. A missing package switches only that feature off (with a notice); it used to make the import
+# fail, and room.py then ran the stub agent: a deployed server looked fine but had no AI at all.
 SIGNALS = os.environ.get("MEET_SIGNALS", "1") == "1"  # per-person turn-taking models (about one CPU core each)
+if SIGNALS and not _installed("torch", "maai"):
+    print("turn-taking models off: torch/maai not installed (pip install torch && pip install --no-deps maai)",
+          flush=True)
+    SIGNALS = False
 # When Higgs STT fails, a line is transcribed locally instead. 2026-10-23 (hackathon day) Higgs STT answered 5 of 6
 # clean TTS lines with the text "the transcription is not available right now" after exactly ~3.05 s (a healthy
 # transcript: ~0.3 s), so improved Higgs heard nothing and stayed idle. A line waits STT_WAIT s for Higgs; then
@@ -53,8 +69,19 @@ SIGNALS = os.environ.get("MEET_SIGNALS", "1") == "1"  # per-person turn-taking m
 # pads to 30 s windows). After a failure in the last minute the local transcript starts with the Higgs request
 # instead of after it. Each use is logged as stt_fallback.
 STT_FALLBACK = os.environ.get("MEET_STT_FALLBACK", "1") == "1"
+if STT_FALLBACK and not _installed("faster_whisper"):
+    print("local STT fallback off: faster-whisper not installed", flush=True)
+    STT_FALLBACK = False
 STT_WAIT = float(os.environ.get("MEET_STT_WAIT", "1.0"))
 STT_FAILED = re.compile(r"transcription is not available", re.I)
+FACT_WAIT = float(os.environ.get("MEET_FACT_WAIT", "0.8"))  # most a decided line waits for its fact checks
+FACT_MIN_CONF = float(os.environ.get("MEET_FACT_MIN_CONFIDENCE", "0.8"))  # a correction needs this, plus evidence
+FACT_COOLDOWN = float(os.environ.get("MEET_FACT_COOLDOWN", "20"))     # seconds between two corrections
+CORRECTION_GUARD = float(os.environ.get("MEET_CORRECTION_GUARD", "2"))  # a correction can't be talked down this long
+INSIST_S = 0.6           # after the guard, someone must keep interrupting this long to stop a correction
+NOISE_GATE = os.environ.get("MEET_NOISE_GATE", "1") == "1"  # spectral noise gate on each person's speech detector
+LEX = words.lexicon(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "fillers.en.yaml"))
+DURING = " [said while you were correcting]"
 CALLS = {"n": 0}
 # In 1:1 Mm-hm a commit after 0.1 s of silence is a cancellable guess. Here a committed line is transcribed and judged
 # (7 requests) and shown to everyone, so a line ends only after a real pause: 0.45 s with the turn-taking model
@@ -239,7 +266,7 @@ def judge_rule(d, r, prompt="v4b"):
     return d.get("ask") is True or d.get("reply") is True
 
 
-async def decide(r, ask, samples=3, prompt="v4b"):
+async def decide(r, ask, samples=3, prompt="v4b", check=True):
     """Should the AI speak after r's current turn? ask(kind, system, user, i) -> Higgs's text, kind "judge"/"check".
     Majority of the judge votes that came back (a failed request is an abstention, not a "no": under load Higgs fails
     a few percent of requests with upstream_error), OR all fact-checks that came back (at least a majority of them) say
@@ -249,7 +276,7 @@ async def decide(r, ask, samples=3, prompt="v4b"):
     (jsys, juser), (fsys, fuser) = judge_prompt(r, prompt), third_voice.fact_prompt(r)
     jt = [asyncio.ensure_future(ask("judge", jsys, juser, i)) for i in range(samples)]
     # nothing to contradict without a fact sheet (MSI-Bench rooms: the checks then "found" contradictions anyway)
-    ft = [asyncio.ensure_future(ask("check", fsys, fuser, i)) for i in range(samples)] if r.get("facts") else []
+    ft = [asyncio.ensure_future(ask("check", fsys, fuser, i)) for i in range(samples)] if r.get("facts") and check else []
     need = samples // 2 + 1  # this many "speak" votes decide it whatever the others say
 
     def got(t):  # a vote's JSON, None if it failed
@@ -260,7 +287,8 @@ async def decide(r, ask, samples=3, prompt="v4b"):
         if sum(judge_rule(got(t), r, prompt) for t in jt if t.done()) >= need:
             break  # decided to speak; the fact-checks only say whether it's a correction: give them a moment
     early = bool(pending)
-    _, late = await asyncio.wait(ft, timeout=0.25 if early else None) if ft else (set(), set())
+    # a slow fact check must not hold up an ordinary answer (it waited for its full upstream timeout before)
+    _, late = await asyncio.wait(ft, timeout=0.25 if early else FACT_WAIT) if ft else (set(), set())
     for t in list(pending) + list(late):
         t.add_done_callback(lambda f: f.exception())
     parsed = [p for p in map(got, jt) if isinstance(p, dict)]
@@ -275,8 +303,10 @@ async def decide(r, ask, samples=3, prompt="v4b"):
         wrong = False  # the fact-check reacting to an earlier wrong claim, not to this line ("I'll just check it.")
     speak = early or (bool(parsed) and sum(judge_rule(p, r, prompt) for p in parsed) * 2 > len(parsed)) or wrong
     reading = dict(parsed[0] if parsed else {})
-    if wrong:
-        reading["wrong"] = True
+    # "wrong" (a correction that may take the floor) comes only from the dedicated fact checks. The judge's own guess
+    # used to be copied through, so a correction could be announced as verified when every check said no.
+    reading["judge_wrong"] = bool(reading.get("wrong"))
+    reading["wrong"] = wrong
     return speak, {"reading": reading, "why": reason(reading, speak), "votes": len(parsed), "checks":
                    [p.get("contradicts") for p in checks]}
 
@@ -621,9 +651,13 @@ class Pool:
         more writers at once than the pool holds (draft, correction draft, a hedge, a re-ask), and waiting 3 s for one
         to come back defeated the hedge."""
         while True:
+            if self.closed:
+                raise RuntimeError("pool closed")
             try:
                 s = await asyncio.wait_for(self.q.get(), 0.05)
             except asyncio.TimeoutError:
+                if self.closed:
+                    raise RuntimeError("pool closed")
                 s = self._new()
                 await asyncio.wait_for(s.__aenter__(), 20)
                 s.opened_at = time.perf_counter()
@@ -772,8 +806,13 @@ class RealtimeSpeaker:
             ok = bool(text) and await task
         if self.cancelled:
             return
-        if not ok:  # no Realtime voice this time: TTS 3 from the start (whatever arrived is dropped)
-            del self.audio[:]
+        if not ok and self.audio:
+            # part of the speech exists and may already be playing: never rewind it (the consumer's position would
+            # point into different audio). End the reply cleanly with what was said.
+            self.finished = True
+            self.on_done()
+            return
+        if not ok:  # nothing came: TTS 3 from the start
             self.fallback = SentenceSpeaker(VOICE, self.audio, self.on_done)
             self.fallback.feed(text)
             self.fallback.close()
@@ -908,6 +947,72 @@ class DefaultBrain:
             await self.a.status("speaking")
 
 
+def attribute(reply, sources, facts):
+    """Which document excerpt or sourced fact a reply rests on: the one sharing the most specific words with it (at
+    least 3, and at least a third of the reply's own). None for small talk and general knowledge."""
+    said = set(terms(reply))
+    if len(said) < 3:
+        return None
+    best, label = 0, None
+    for f in facts:
+        if f.get("doc"):
+            n = len(said & set(terms(f["text"])))
+            if n > best:
+                best, label = n, f"{f['doc']}{' p.' + str(f['page']) if f.get('page') else ''}"
+    for s in sources:
+        n = len(said & set(terms(s["text"])))
+        if n > best:
+            best, label = n, f"{s['doc']}{' p.' + str(s['page']) if s.get('page') else ''}"
+    return label if best >= 3 and best >= len(said) / 3 else None
+
+
+class ProbeSTT:
+    """Transcribes a listener's barge-in so far, while Higgs talks, on its own Realtime session (~0.3 s from commit to
+    words; the main per-person streams are left alone). Falls back to one-shot HTTP transcription (~0.6 s)."""
+
+    def __init__(self, models):
+        self.models, self.session, self.lock = models, None, asyncio.Lock()
+
+    async def _open(self):
+        if self.session is not None and self.session.close_code is None:
+            return self.session
+        tr = {"model": "higgs-stt-3.1", **({"language": LANG} if LANG else {})}
+        s = Session({"instructions": "Transcription only.", "output_modalities": ["text"],
+                     "audio": {"input": {"turn_detection": None, "transcription": tr}}})
+        await asyncio.wait_for(s.__aenter__(), 10)
+        self.session = s
+        return s
+
+    async def transcribe(self, pcm):
+        async with self.lock:
+            try:
+                if not spend():
+                    return ""
+                s = await self._open()
+                since = s.now()
+                for k in range(0, len(pcm), 4800):  # faster than real time: the audio already exists
+                    await s.send({"type": "input_audio_buffer.append",
+                                  "audio": base64.b64encode(pcm[k:k + 4800].tobytes()).decode()})
+                await s.send({"type": "input_audio_buffer.commit"})
+                _, ev = await s.wait("input_audio_buffer.committed", timeout=2, since=since)
+                item = ev.get("item_id")
+                _, ev = await s.wait(lambda e: e.get("type") == "conversation.item.input_audio_transcription.completed"
+                                     and e.get("item_id") == item, timeout=2, since=since)
+                return (ev.get("transcript") or "").strip()
+            except Exception:  # noqa: BLE001
+                if self.session is not None:
+                    asyncio.ensure_future(close(self.session))
+                    self.session = None
+        try:
+            return await self.models.transcribe(pcm, timeout=3)
+        except Exception:  # noqa: BLE001
+            return ""
+
+    async def close(self):
+        if self.session is not None:
+            await close(self.session)
+
+
 class Listener:
     """One person in improved mode: their own transcription session, VAD, turn-taking models and gates."""
 
@@ -930,6 +1035,12 @@ class Listener:
         self.opener = None
         self.line_audio = []     # this line's frames as sent to STT, for the local fallback
         self.intervention_buffering = False
+        # spectral noise gate (noise_gate.py): speech must stand out from this person's own noise spectrum, be in the
+        # speech band, not be flat; once their voice level is known, quieter background talkers don't count
+        self.fe = noise_gate.SpeakerFrontEnd() if NOISE_GATE else None
+        self.cur, self.voiced = [], 0.0  # this line's audio and voiced seconds so far (for the barge-in probe)
+        self.probe_task, self.probed_at = None, 0.0
+        self.during = False      # part of this line was said over one of Higgs's corrections
 
     def _new_session(self):
         tr = {"model": "higgs-stt-3.1", **({"language": LANG} if LANG else {})}
@@ -969,8 +1080,8 @@ class Listener:
                     await s.send({"type": "input_audio_buffer.append", "audio": base64.b64encode(f.tobytes()).decode()})
                 self.open = True
                 if self.commit_waiting is not None:
-                    (t_end, audio), self.commit_waiting = self.commit_waiting, None
-                    asyncio.ensure_future(self._transcribe(t_end, audio))
+                    (t_end, audio, during), self.commit_waiting = self.commit_waiting, None
+                    asyncio.ensure_future(self._transcribe(t_end, audio, during))
                 return
         self.opener = asyncio.ensure_future(go())
 
@@ -1007,6 +1118,10 @@ class Listener:
         if self.speaking and echo_db is not None and probable_echo(pcm, echo_db):
             self.speaking = False
             self.echo_frames += 1
+        if self.fe is not None:
+            self.fe.push(pcm)
+            if self.speaking and not self.fe.active:
+                self.speaking = False  # loud, but noise (fan, hum, clicks) or a background talker, not this person
         if self.speaking:
             self.last_voice = time.perf_counter()
         # continuous speech (gaps under 0.25 s don't break it): a "mm" is short, taking the floor isn't
@@ -1025,6 +1140,12 @@ class Listener:
             self.preroll.clear()
         if self.streaming:
             await self._append(pcm)
+            if len(self.cur) < 1500:  # 30 s
+                self.cur.append(pcm)
+            if self.speaking:
+                self.voiced += TICK
+            if self.b.intervention_active:
+                self.during = True
         else:
             self.preroll.append(pcm)
         buffering = self.b.intervention_active and self.streaming
@@ -1045,23 +1166,25 @@ class Listener:
                 self.commit_info = {"why": self.gate.why, "p_now": None if self.p_now is None else round(self.p_now, 2),
                                     "lag": self.signals.lag() if self.signals is not None else None}
                 audio, self.line_audio = self.line_audio, []
+                during, self.during = self.during, False
+                self.cur, self.voiced = [], 0.0
                 if self.open:
-                    asyncio.ensure_future(self._transcribe(time.perf_counter(), audio))
+                    asyncio.ensure_future(self._transcribe(time.perf_counter(), audio, during))
                 else:
-                    self.commit_waiting = (time.perf_counter(), audio)
+                    self.commit_waiting = (time.perf_counter(), audio, during)
             elif act == "resume":
                 self.merge = True
                 self.b.on_resume(self)
 
-    async def _transcribe(self, t_end, audio=()):
+    async def _transcribe(self, t_end, audio=(), during=False):
         self.decided_early = False
         try:
-            await self._transcribe_and_decide(t_end, audio)
+            await self._transcribe_and_decide(t_end, audio, during)
         finally:
             if not self.decided_early:
                 self.in_flight = max(0, self.in_flight - 1)
 
-    async def _transcribe_and_decide(self, t_end, audio=()):
+    async def _transcribe_and_decide(self, t_end, audio=(), during=False):
         if not spend():
             return
         s = self.session
@@ -1100,7 +1223,7 @@ class Listener:
         self.t_transcript = time.perf_counter()
         if text:
             merge, self.merge = self.merge, False
-            await self.b.on_line(self, text, t_end, merge)
+            await self.b.on_line(self, text, t_end, merge, during=during)
 
 
 class Reply:
@@ -1126,6 +1249,8 @@ class Reply:
         self.intervention = False  # verified fact correction: take the floor even if the speaker resumed
         self.cancel = False
         self.started = False     # first audio frame sent
+        self.drain_until = None  # all audio sent: when it will have been heard (playback report or estimate)
+        self.drain_ev = None
         self.marks = {"created": time.perf_counter()}  # when each stage finished (perf_counter), for timing logs
         self.rt = reader is not None  # voiced by a Realtime session (Avatar on), not TTS 3
         done = lambda: setattr(self, "done", True)  # noqa: E731
@@ -1133,6 +1258,13 @@ class Reply:
         if text is not None:
             self.feed(text)
             self.close()
+
+    def heard(self, now):
+        """Everything sent has been heard: the avatar reported playback, or the estimated in-flight time passed. The
+        floor (and a correction's ducking) used to be released the moment the last frame was sent."""
+        if self.drain_until is None:
+            return False
+        return (self.drain_ev is not None and self.drain_ev.is_set()) or now >= self.drain_until
 
     def feed(self, delta):
         if self.closed:
@@ -1188,6 +1320,22 @@ class ImprovedBrain:
         self.line_by = {}         # line id -> slot of who said it
         self.out_db = deque([-90.0], maxlen=30)  # Higgs's output level over the last 0.6 s (echo gate)
         self.reader = None        # Pool of Realtime voice sessions for replies with the face on (opened on first use)
+        self.pool_key = None      # (names, facts) the pools were built for: rebuild only when that changes
+        self.pool_lock = asyncio.Lock()
+        self.stopped = False
+        self.models = boson_http.Models(spend=spend, language=LANG)
+        # contradictions: checked against the fact sheet, the documents and what people said earlier; a correction
+        # needs cited evidence that really exists in its source (fact_monitor.py)
+        self.monitor = fact_monitor.Monitor(min_confidence=FACT_MIN_CONF, cooldown_s=FACT_COOLDOWN)
+        self.probe = ProbeSTT(self.models)
+        self.insist = {}          # slot -> when they first kept interrupting a correction after its guard
+        self.tasks = set()
+
+    def _spawn(self, coro):
+        t = asyncio.ensure_future(coro)
+        self.tasks.add(t)
+        t.add_done_callback(lambda f: (self.tasks.discard(f), f.cancelled() or f.exception()))
+        return t
 
     def voice(self):
         """The reader pool when the face is on and Realtime voices it, else None (TTS 3)."""
@@ -1207,7 +1355,15 @@ class ImprovedBrain:
         return {"target_speaker": a.ai, "setting": a.setting, "people": a.names(), "facts": a.facts,
                 "context_turns": [], "current_turn": {"speaker": "", "text": ""}}
 
-    async def _rebuild_pools(self):
+    async def _rebuild_pools(self, force=False):
+        async with self.pool_lock:
+            key = (tuple(self.a.names()), tuple(self.a.facts))
+            if self.stopped or (not force and self.pools and key == self.pool_key):
+                return  # a mute/camera toggle sent the roster again: same people, same pools
+            self.pool_key = key
+            await self._build_pools()
+
+    async def _build_pools(self):
         old, p = self.pools, self.point()
         n = self.samples = samples_for(len(p["people"]))
         self.pools = {"judge": Pool(judge_prompt(p, PROMPT)[0], n),
@@ -1231,6 +1387,10 @@ class ImprovedBrain:
         return False  # each listener and pool reconnects on its own
 
     async def stop(self):
+        self.stopped = True
+        if self.playing is not None:  # the reply being heard: stop its voice too (only `pending` was cancelled)
+            self.playing.cancel = True
+            self.playing.speaker.cancel()
         if self.playing and self.playing.intervention:
             await self.a.room.event({"type": "human_gain", "gain": 1.0, "reason": "fact_correction_stopped"})
         if self.pools:
@@ -1245,6 +1405,11 @@ class ImprovedBrain:
         if self.reader:
             await self.reader.close()
         self._cancel_pending()
+        for t in list(self.tasks):
+            t.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+        await self.probe.close()
+        await self.models.close()
 
     async def on_roster(self, people):
         now = {p["slot"]: p["name"] for p in people}
@@ -1278,8 +1443,10 @@ class ImprovedBrain:
             self.pending.speaker.cancel()
             self.pending = None
 
-    async def on_line(self, li, text, t_end, merge):
+    async def on_line(self, li, text, t_end, merge, during=False):
         a = self.a
+        if self.pools and (tuple(a.names()), tuple(a.facts)) != self.pool_key:
+            self._spawn(self._rebuild_pools())  # the fact sheet changed (documents, edits): fresh writer pools
         if not re.search(r"[A-Za-z]", text):
             return  # "...", or a hum transcribed in another script ("嗯。")
         # Check the raw new utterance before merging it with an earlier question. Otherwise 'okay' inherits the
@@ -1311,7 +1478,7 @@ class ImprovedBrain:
         if kind == "skip":
             return
         context = list(a.history)
-        cur = {"speaker": li.name, "text": text}
+        cur = {"speaker": li.name, "text": text + (DURING if during else "")}  # the writer answers talk-over
         a.history.append(cur)
         if kind:  # "mm-hm", "um", "so the, uh,": part of the meeting, but nothing to answer, and it doesn't make a reply
             if kind != "unfinished":  # someone else is waiting for stale; an unfinished line merges with what follows
@@ -1327,7 +1494,17 @@ class ImprovedBrain:
             r["facts"] = third_voice.top_facts(r, 8)
         pools = self.pools
         ctx = "\n".join(f"{t['speaker']}: {t['text']}" for t in context[-14:])
-        convo = f"Conversation so far:\n{ctx}\n{li.name}: {text}\n\nReply as {a.ai}:"  # "Your reply:" was continued as a person
+        convo = f"Conversation so far:\n{ctx}\n{li.name}: {cur['text']}\n\nReply as {a.ai}:"  # "Your reply:" was continued as a person
+        kbase = getattr(a.room, "kb", None)
+        src = kbase.search(text + " " + " ".join(t["text"] for t in context[-2:]), k=3) if kbase is not None else []
+        if src:  # the meeting's documents: the writer answers from them when they answer the line
+            convo = ("[Excerpts from the meeting's documents; use them only if they answer the latest utterance:]\n"
+                     + "\n".join(f"- ({x['doc']}{' p.' + str(x['page']) if x.get('page') else ''}) {x['text'][:600]}"
+                                  for x in src) + "\n\n" + convo)
+        mon = None
+        if PROACTIVE_FACTS and fact_monitor.claim_like(text):
+            mon = self._spawn(self._check(li, text, line_id, context))
+            self.monitor.remember(fact_monitor.Claim(str(line_id), li.name, text, time.monotonic()))
         addressed = (len(self.listeners) == 1 or re.search(rf"\b{re.escape(a.ai)}\b", text, re.I) is not None
                      or named_ai_before(context, li.name, a.ai))
         reader = self.voice()
@@ -1343,7 +1520,8 @@ class ImprovedBrain:
         draft = asyncio.ensure_future(writer.ask(convo, retries=1, on_delta=spec.feed if spec else None))
         # both drafts start with the decision, so a correction costs no extra wait (rewriting it after: ~1 s)
         cdraft = asyncio.ensure_future(pools["write"].ask(CORRECT.format(ai=a.ai) + convo, retries=1)) if a.facts else None
-        speak, d = await decide(r, lambda kind, _sys, user, _i: pools[kind].ask(user), samples=self.samples, prompt=PROMPT)
+        speak, d = await decide(r, lambda kind, _sys, user, _i: pools[kind].ask(user), samples=self.samples, prompt=PROMPT,
+                                check=False)
         why = d["reading"]
         t_decided = time.perf_counter()
         li.in_flight = max(0, li.in_flight - 1)  # decided: a reply waiting on this line may go (or drop)
@@ -1351,6 +1529,21 @@ class ImprovedBrain:
         await a.line(li.slot, li.name, text, {"speak": speak, "why": d["why"], "reading": why, "votes": d["votes"],
                                               "checks": d["checks"],
                                               "decided_s": round(time.perf_counter() - t_end, 2)}, merged)
+        verdict = None
+        if mon is not None:
+            done, _ = await asyncio.wait({mon}, timeout=FACT_WAIT)
+            if done:
+                verdict = mon.result()
+            else:  # a slow check never holds up the answer; if it confirms later, the correction still cuts in
+                mon.add_done_callback(lambda f: self._late(f, li, line_id, text, t_end))
+        if verdict is not None and verdict.contradicts:
+            if spec:
+                spec.speaker.cancel()
+            for f in (draft, cdraft):
+                if f:
+                    f.add_done_callback(lambda f: f.exception())
+            await self._correct(li, line_id, text, t_end, verdict)
+            return
         if not speak:
             li.gate.settle()
             if spec:
@@ -1360,7 +1553,7 @@ class ImprovedBrain:
                     f.add_done_callback(lambda f: f.exception())
             return
         convo_used = convo
-        if why.get("wrong") and cdraft:  # the plain draft was written without knowing why Higgs speaks
+        if why.get("judge_wrong") and cdraft:  # the judge thinks it's wrong: an ordinary reply that corrects it  # the plain draft was written without knowing why Higgs speaks
             draft, cdraft = cdraft, draft
             convo_used = CORRECT.format(ai=a.ai) + convo
             if spec:
@@ -1421,8 +1614,9 @@ class ImprovedBrain:
             self.pending = Reply(line_id, li, text, ans, t_end, reader=reader)
         self.pending.vocative = vocative_only(text, a.ai)
         self.pending.addressed = addressed
-        self.pending.correction = bool(why.get("wrong"))
-        self.pending.intervention = bool(PROACTIVE_FACTS and why.get("wrong"))
+        self.pending.correction = bool(why.get("judge_wrong"))
+        self.pending.intervention = False  # only a verified contradiction (_correct) takes the floor
+        self.pending.source = attribute(ans, src, kbase.facts() if kbase is not None else [])
         if a.rendered_avatar:  # render ahead for the legacy /videos/stream avatar
             self.pending.video = False
             self.pending.render = asyncio.ensure_future(self._render(self.pending))
@@ -1430,6 +1624,61 @@ class ImprovedBrain:
                                   transcript=getattr(li, "t_transcript", t_end), decided=t_decided, draft=t_draft,
                                   speculated=spec is not None)
         await a.status("thinking")
+
+    async def _check(self, li, text, line_id, context):
+        history = "\n".join(f"{t['speaker']}: {t['text']}" for t in context[-8:])
+        t0 = time.perf_counter()
+        v = await self.monitor.check(self.models, getattr(self.a.room, "kb", None), speaker=li.name, text=text,
+                                     setting=self.a.setting, history=history)
+        self.a.room.log({"type": "fact_check", "line": line_id, "speaker": li.name, "text": text,
+                         "contradicts": v.contradicts, "reason": v.reason, "evidence_id": v.evidence_id,
+                         "evidence": v.evidence, "confidence": v.confidence, "s": round(time.perf_counter() - t0, 2)})
+        return v
+
+    def _late(self, fut, li, line_id, text, t_end):
+        if fut.cancelled() or fut.exception() is not None or self.stopped:
+            return
+        v = fut.result()
+        if v.contradicts and self.line_no - line_id <= 2 and time.perf_counter() - t_end < 10:
+            self._spawn(self._correct(li, line_id, text, t_end, v))
+
+    async def _correct(self, li, line_id, text, t_end, v):
+        """A verified contradiction: it takes the floor (tick plays it at once, talking over people, with everyone else
+        ducked). Its words come straight from the check, which named the evidence."""
+        a = self.a
+        self._cancel_pending()
+        playing = self.playing
+        if playing is not None and not playing.intervention:
+            await self._interrupt(playing, li)
+        r = Reply(line_id, li, text, v.correction, t_end, reader=self.voice())
+        r.correction = r.intervention = r.addressed = True
+        r.source, r.evidence = v.source, v.evidence
+        if a.rendered_avatar:
+            r.video = False
+            r.render = asyncio.ensure_future(self._render(r))
+        self.pending = r
+        await a.room.event({"type": "correction", "speaker": li.name, "claim": text, "text": v.correction,
+                            "source": v.source, "evidence": v.evidence})
+        await a.status("thinking")
+
+    async def _probe(self, li, r):
+        """Fillers never stop Higgs; a real interruption does at once, a correction only after its guard and only if
+        they keep going."""
+        text = await self.probe.transcribe(np.concatenate(li.cur)) if li.cur else ""
+        verdict = words.bargein(text, li.voiced, LEX, self.a.ai)
+        self.a.room.log({"type": "bargein_probe", "slot": li.slot, "text": text, "verdict": verdict,
+                         "voiced_s": round(li.voiced, 2), "correction": r.intervention})
+        if self.playing is not r or verdict not in ("stop", "interrupt"):
+            return
+        now = time.perf_counter()
+        if r.intervention:
+            if now - r.marks.get("play_started", now) < CORRECTION_GUARD:
+                return  # inside the guard: keep talking over them (what they say is held, then answered)
+            first = self.insist.setdefault(li.slot, now)
+            if now - first < INSIST_S:
+                return  # a line that just ran past the guard doesn't count; still pressing does
+        await self._interrupt(r, li)
+        await self.a.room.event({"type": "interruption_confirmed", "slot": li.slot, "text": text, "by": "probe"})
 
     async def tick(self, frames):
         t = self.t = self.t + TICK
@@ -1444,6 +1693,16 @@ class ImprovedBrain:
             others = np.clip(total - pcm, -32768, 32767).astype(np.int16)  # VAP's ch2: everyone but this person
             await li.tick(t, pcm, others, echo_db)
         await self._lab(t)
+        rp = self.playing
+        if rp is not None and rp.started and rp.drain_until is None:
+            for li in self.listeners.values():
+                if (li.speaking and li.voiced >= LEX.probe_first_s and li.voiced - li.probed_at >= 0.1
+                        and (li.probe_task is None or li.probe_task.done())):
+                    li.probed_at = li.voiced
+                    li.probe_task = self._spawn(self._probe(li, rp))
+        for li in self.listeners.values():
+            if not li.streaming:
+                li.probed_at = 0.0
         anyone = any(li.speaking for li in self.listeners.values())
         self.take.tick(t, anyone)
         if anyone:
@@ -1486,6 +1745,7 @@ class ImprovedBrain:
                     li2.barge.reset()
                 r.play_why = why
                 if r.intervention:
+                    self.insist = {}
                     await self.a.room.event({"type": "human_gain", "gain": FACT_DUCK_GAIN, "reason": "fact_correction",
                                              "speaker": li.slot})
                 if self.a.rendered_avatar:  # legacy face: audio waits for the first rendered video chunk
@@ -1543,7 +1803,8 @@ class ImprovedBrain:
                 timing["gate"] = m.get("gate")
                 await self.a.status("speaking", after_s=round(now - r.t_end, 2), why=r.play_why, timing=timing,
                                     intervention=r.intervention)
-                await self.a.room.event({"type": "ai_say", "text": r.text})
+                await self.a.room.event({"type": "ai_say", "text": r.text, "source": getattr(r, "source", None),
+                                         "correction": r.intervention})
             # Don't duck or cancel on microphone energy alone. on_line() confirms a genuine interruption from its
             # transcript; fillers keep full-volume AI playback even when repeated for several seconds.
             g = 1.0
@@ -1555,6 +1816,11 @@ class ImprovedBrain:
                 out = np.zeros(N, np.int16)
                 out[:len(a) // 2] = np.frombuffer(a, np.int16)
                 r.pos += len(a) // 2
+            elif r.done and not r.heard(time.perf_counter()):
+                if r.drain_until is None:  # all sent, not yet heard: close the segment and wait for playback
+                    await self.a.room.end_ai_segment()
+                    delay, r.drain_ev = self.a.room.playout()
+                    r.drain_until = time.perf_counter() + delay
             elif r.done:
                 self.playing = None
                 r.cancel = True  # the words are over: video still rendering (a part's padding) isn't sent
@@ -1672,7 +1938,8 @@ class HiggsAgent:
         if SIGNALS:
             SPARES.fill()  # the first room starts loading turn-taking models for the people who will join
         b = room.brief
-        self.ai, self.setting, self.facts = b.get("ai") or "Higgs", b.get("setting") or "a meeting", list(b.get("facts") or [])
+        self.ai, self.setting = b.get("ai") or "Higgs", b.get("setting") or "a meeting"
+        self._brief_facts = list(b.get("facts") or [])
         self.history = []
         self.brain = None
         self.mode = getattr(room, "mode", "improved")
@@ -1691,13 +1958,19 @@ class HiggsAgent:
         return [p["name"] for p in self.room.people()]
 
     @property
+    def facts(self):
+        """The room's fact sheet: the knowledge base's (host-edited and extracted from documents) if it has one."""
+        kb = getattr(self.room, "kb", None)
+        return (kb.fact_texts() if kb is not None else None) or self._brief_facts
+
+    @property
     def rendered_avatar(self):
         """True only for the old fMP4 rendering path.
 
         With LiveKit, Boson's avatar consumes the normal audio output and publishes
         synchronized tracks itself, so none of the hold/render/filler machinery applies.
         """
-        return self.avatar and not getattr(self.room, "livekit", False)
+        return self.avatar and not getattr(self.room, "livekit", False) and not getattr(self.room, "avatar_livekit", False)
 
     def persona(self):
         return PERSONA.format(ai=self.ai, setting=self.setting, people=", ".join(self.names()) or "the group",
@@ -1748,8 +2021,19 @@ class HiggsAgent:
 
     async def start(self):
         self.running = True
-        self.task = asyncio.ensure_future(self._run())
+        self.task = asyncio.ensure_future(self._supervise())
         self._launch()
+
+    async def _supervise(self):
+        """Keep the audio loop alive: if it ever raises, log it and start it again (it used to die silently)."""
+        while self.running:
+            try:
+                await self._run()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                await self.room.event({"type": "ai_error", "error": f"audio loop restarted: {e!r}"[:300]})
+                await asyncio.sleep(0.1)
 
     async def stop(self):
         st = dict(self.stats)
@@ -1852,7 +2136,13 @@ class HiggsAgent:
                         await self.room.event({"type": "ai_error", "error": repr(e)[:300]})
                     out = None
                 if out is not None:
-                    await self.room.send_ai_audio(out.astype(np.int16).tobytes())
+                    try:
+                        await self.room.send_ai_audio(out.astype(np.int16).tobytes())
+                    except Exception as e:  # noqa: BLE001  (a send error must not end the only audio loop)
+                        self.stats["send_errors"] = self.stats.get("send_errors", 0) + 1
+                        if time.perf_counter() - self.errors_t > 5.0:
+                            self.errors_t = time.perf_counter()
+                            await self.room.event({"type": "ai_error", "error": f"audio send: {e!r}"[:300]})
             delay = t0 + k * TICK - time.perf_counter()
             self.stats["late_max"] = max(self.stats["late_max"], round(-delay, 3))
             if max((len(q) for q in self.inq.values()), default=0) > 2:

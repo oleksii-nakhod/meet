@@ -29,6 +29,22 @@ button:disabled { opacity: .5; cursor: default; }
 #done a { color: var(--accent); word-break: break-all; font-size: 17px; }
 #done .ghost { background: #232633; color: var(--ink); border: 1px solid var(--line); }
 .hidden { display: none !important; }
+.kb { font-size: 14px; }
+.kb button { width: auto; margin-top: 0; padding: 7px 12px; font-size: 14px; border-radius: 9px; }
+.kb .row2 { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+.kb .row2 input { flex: 1; }
+.kb .drop { border: 2px dashed var(--line); border-radius: 12px; padding: 16px; text-align: center; color: var(--muted); }
+.kb .drop.over { border-color: var(--accent); color: var(--accent); }
+.kb ul { list-style: none; padding: 0; margin: 10px 0 0; }
+.kb .doclist li { display: flex; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.kb .factlist li { display: flex; gap: 6px; align-items: center; padding: 3px 0; }
+.kb .factlist .src { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.kb .pill { font-size: 12px; padding: 1px 8px; border-radius: 99px; border: 1px solid currentColor; color: var(--muted); }
+.kb .pill.good { color: #4cc185; } .kb .pill.bad { color: var(--danger); } .kb .pill.warn { color: #e0a84a; }
+.kb .danger { background: transparent; color: var(--danger); border: 1px solid var(--line); padding: 4px 9px; }
+.kb .grow { flex: 1; } .kb .empty { color: var(--muted); }
+.kb h2 { font-size: 15px; margin: 16px 0 4px; } .kb details summary { cursor: pointer; color: var(--muted); margin-top: 10px; }
+
 @media (max-width: 520px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -56,6 +72,11 @@ Submissions close Saturday at 3 pm.</textarea>
     <p><a id="link" href="#"></a></p>
     <button id="copy" class="ghost">Copy link</button>
     <button id="join">Join now</button>
+  </section>
+  <section class="card hidden" id="kbcard" style="margin-top:16px">
+    <div class="brand" style="font-size:17px">Knowledge base</div>
+    <div class="sub">Documents the AI answers from and checks people against. You can add more during the call.</div>
+    <div class="kb" id="kb"></div>
   </section>
 </main>
 <script src="/agendas.js"></script>
@@ -103,6 +124,8 @@ $("create").onclick = async () => {
     const url = location.origin + d.link + (body.passcode ? `?k=${encodeURIComponent(body.passcode)}` : "");
     $("link").textContent = url; $("link").href = url;
     $("form").classList.add("hidden"); $("done").classList.remove("hidden");
+    $("kbcard").classList.remove("hidden");
+    import("/kb.js").then((m) => m.mountKB($("kb"), d.id, { by: "host" }));
     $("join").onclick = () => (location.href = url);
     $("copy").onclick = () => navigator.clipboard.writeText(url).then(() => ($("copy").textContent = "Copied"), () => {});
   } catch (e) { $("err").textContent = e.message; $("create").disabled = false; }

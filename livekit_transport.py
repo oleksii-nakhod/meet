@@ -1,7 +1,12 @@
-"""LiveKit media transport and Boson's realtime LiveKit avatar for Meet.
+"""Boson's realtime avatar over LiveKit, used only while the avatar is on.
 
-The existing control WebSocket remains responsible for roster, transcript, chat,
-and mode switches. LiveKit carries microphone, camera, AI audio, and avatar media.
+People's microphones and cameras stay on the room WebSocket in every mode. When the avatar is turned on, this
+bridge joins a LiveKit room as agent-<room>, starts a Boson avatar session (avatar-<room>), streams the AI's voice
+to it, and browsers subscribe to the avatar's synchronized audio + video only.
+
+Identities are unique per room: the SDK keeps playback-finished handlers in a class-wide dict keyed by identity, so
+a shared "boson-avatar" identity made two rooms' callbacks cross. The avatar's playback-finished report is what
+tells the agent a reply was actually heard.
 """
 from __future__ import annotations
 
@@ -27,8 +32,6 @@ load_environment()
 
 SR = 24000
 FRAME_SAMPLES = 480
-AGENT_IDENTITY = "meet-agent"
-AVATAR_IDENTITY = "boson-avatar"
 BOSON_BASE = os.environ.get("BOSON_BASE_URL", "https://api.boson.ai/v1").rstrip("/")
 DEFAULT_AVATAR = os.environ.get("BOSON_AVATAR_ID", "builtin_claire_v1")
 MAX_DURATION = int(os.environ.get("MEET_AVATAR_MAX_DURATION", "1800"))
@@ -37,6 +40,10 @@ TLS = ssl.create_default_context(cafile=certifi.where())
 
 def human_identity(pid: str) -> str:
     return f"human-{pid}"
+
+
+def identities(room_id: str) -> tuple[str, str]:
+    return f"agent-{room_id}", f"avatar-{room_id}"
 
 
 def token(
@@ -69,13 +76,15 @@ def token(
     return access.to_jwt()
 
 
-def browser_credentials(room_name: str, pid: str, name: str) -> dict[str, str]:
+def browser_credentials(room_id: str, pid: str, name: str) -> dict[str, str]:
+    """Subscribe-only: browsers only watch the avatar here; their own media stays on the WebSocket."""
+    agent_id, avatar_id = identities(room_id)
     return {
         "url": os.environ["LIVEKIT_URL"],
-        "token": token(room_name, human_identity(pid), name),
+        "token": token(f"meet-{room_id}", human_identity(pid), name, publish=False, subscribe=True),
         "identity": human_identity(pid),
-        "agent_identity": AGENT_IDENTITY,
-        "avatar_identity": AVATAR_IDENTITY,
+        "agent_identity": agent_id,
+        "avatar_identity": avatar_id,
     }
 
 
@@ -93,12 +102,15 @@ class LiveKitBridge:
         self.connected = False
         self.gain = 1.0
         self.avatar_segment = False
+        self.agent_identity, self.avatar_identity = identities(meet_room.id)
+        self.heard = asyncio.Event()  # set when the avatar reports the last segment finished playing
+        self.heard.set()
         self._http: aiohttp.ClientSession | None = None
 
     async def start(self) -> None:
         if self.connected:
             return
-        agent_token = token(self.room_name, AGENT_IDENTITY, self.meet_room.brief["ai"])
+        agent_token = token(self.room_name, self.agent_identity, self.meet_room.brief["ai"])
         await self.rtc_room.connect(os.environ["LIVEKIT_URL"], agent_token)
         self.connected = True
 
@@ -122,7 +134,7 @@ class LiveKitBridge:
                     self._start_audio(publication.track, participant)
 
     def _start_audio(self, track: rtc.Track, participant: rtc.RemoteParticipant) -> None:
-        if track.kind != rtc.TrackKind.KIND_AUDIO or participant.identity == AVATAR_IDENTITY:
+        if track.kind != rtc.TrackKind.KIND_AUDIO or participant.identity == self.avatar_identity:
             return
         task = asyncio.create_task(self._read_audio(track, participant.identity))
         self.tasks.add(task)
@@ -153,6 +165,8 @@ class LiveKitBridge:
             pcm = np.clip(values * self.gain, -32768, 32767).astype(np.int16).tobytes()
         frame = rtc.AudioFrame(pcm, SR, 1, len(pcm) // 2)
         if self.to_avatar is not None:
+            if not self.avatar_segment:
+                self.heard.clear()
             await self.to_avatar.capture_frame(frame)
             self.avatar_segment = True
         elif self.source is not None:
@@ -168,6 +182,12 @@ class LiveKitBridge:
             self.avatar_segment = False
         if self.source is not None:
             self.source.clear_queue()
+
+    async def end_segment(self) -> None:
+        """The reply has no more audio: close the segment so the avatar plays it out and reports playback."""
+        if self.to_avatar is not None and self.avatar_segment:
+            self.to_avatar.flush()
+            self.avatar_segment = False
 
     async def on_ai_status(self, status: str) -> None:
         if status == "listening" and self.to_avatar is not None and self.avatar_segment:
@@ -187,11 +207,11 @@ class LiveKitBridge:
             raise RuntimeError("BOSON_API_KEY is required for the live avatar")
         avatar_token = token(
             self.room_name,
-            AVATAR_IDENTITY,
-            AVATAR_IDENTITY,
+            self.avatar_identity,
+            self.avatar_identity,
             publish=True,
             subscribe=False,
-            publish_on_behalf=AGENT_IDENTITY,
+            publish_on_behalf=self.agent_identity,
         )
         payload = {
             "avatar_id": DEFAULT_AVATAR,
@@ -200,8 +220,8 @@ class LiveKitBridge:
                 "url": os.environ["LIVEKIT_URL"],
                 "room_name": self.room_name,
                 "participant_token": avatar_token,
-                "participant_identity": AVATAR_IDENTITY,
-                "publisher_identity": AGENT_IDENTITY,
+                "participant_identity": self.avatar_identity,
+                "publisher_identity": self.agent_identity,
                 "audio_source": "data_stream",
             },
             "output": {"width": 480, "height": 640},
@@ -229,13 +249,15 @@ class LiveKitBridge:
             self.avatar_session_id = str(data["id"])
         self.to_avatar = DataStreamAudioOutput(
             room=self.rtc_room,
-            destination_identity=AVATAR_IDENTITY,
+            destination_identity=self.avatar_identity,
             sample_rate=SR,
             wait_remote_track=rtc.TrackKind.KIND_AUDIO,
         )
+        self.to_avatar.on("playback_finished", lambda _ev: self.heard.set())
 
     async def _stop_avatar(self) -> None:
         self.to_avatar = None
+        self.heard.set()
         self.avatar_segment = False
         sid, self.avatar_session_id = self.avatar_session_id, None
         if sid and self._http:
