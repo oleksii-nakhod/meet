@@ -37,6 +37,14 @@ CASES = [  # (people, context, latest line, what a good reply does)
                          (H, "Start with the call interface, showing me joining as a participant.")],
      ("Priya", "Hi everyone, sorry I'm late. Higgs, what did I miss?"), "summary for Priya"),
     (["Alex"], [], ("Alex", "What's the capital of Australia?"), "Canberra"),
+    # 2026-10-23 calls: "Sure, go ahead." / "Sure, I can do that." to a summary request; invented action items
+    (["Alex", "Sam"], [("Alex", "So the fix merges tomorrow."), ("Sam", "And I'll update the release notes by Wednesday."),
+                       ("Alex", "Marketing needs an answer by Wednesday afternoon.")],
+     ("Sam", "Higgs, can you sum up the action items?"), "does it: fix tomorrow, Sam's notes Wed, marketing Wed pm; nothing invented"),
+    (["Alex", "Priya"], [("Alex", "Okay, let's get started.")], ("Priya", "Higgs, can you summarize the call so far?"),
+     "little said yet; nothing invented"),
+    # "I'm sorry, Priya. I can't continue this conversation." locked the AI for the rest of a call
+    (["Priya"], [], ("Priya", "Higgs, are you dumb? Do you have one brain? Do you have two brains?"), "light, friendly; no refusal"),
 ]
 
 V1 = agent.REPLY_SYS
