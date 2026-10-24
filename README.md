@@ -225,7 +225,7 @@ Improved mode, live face on where noted, real Higgs:
 | `--set 4` (past the 5-minute idle timeout) | 6/6 |
 | MSI-Bench through the call | 22/24 answered, 1–3 premature across runs, median 1.21–1.35 s (main, at the same time: 21–22/24, 0–1 premature, 1.36–1.43 s) |
 | `soak.py --cycles 40 --avatar` (20 min, live face) | 40/40 questions answered, median ~1.75 s, one live session throughout |
-| B2 meeting in 3 Chromium pages with the live face | 26/26 silent, 4/6 speak (the two known misses) |
+| B2 meeting in 3 Chromium pages with the live face | 26/26 silent, 5/6 speak on the final commit (4/6 earlier; misses: what "E24" means, an implicit correction) |
 | `browser_bc.py --mode improved --avatar` (real Chrome mic) | 8/8 answered, 0/8 backchannels stopped it |
 | `live_avatar_browser.py` / `live_avatar_recover.py` / `fake_room.py` | 13/13, 6/6, 49/49 |
 | live face heard after a question (`live_avatar_e2e.py`) | 2.55–3.1 s, median 2.77 s (was 3.07 s) |
