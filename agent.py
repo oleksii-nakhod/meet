@@ -923,6 +923,10 @@ class Pool:
                 await s.wait(lambda e, i=i: e.get("type") == "conversation.item.deleted" and e.get("item_id") == i,
                              timeout=3, since=since)
             if ids and s.close_code is None and time.perf_counter() - s.opened_at < self.MAX_AGE:
+                # nothing before the next request is read again: drop it (a voice session kept every event and all
+                # its speech for minutes; each wait() scans the list, and the room's tick shares the loop)
+                s.events = [x for x in s.events if x[0] >= s.now() - 0.5]
+                s.audio.clear()
                 await self._put(s)
                 return
         except Exception:  # noqa: BLE001
