@@ -302,8 +302,8 @@ async def decide(r, ask, samples=3, prompt="v4b"):
     if wrong:
         reading["wrong"] = True
     cur, ai = r["current_turn"], r["target_speaker"]
-    if not parsed and (len(r["people"]) == 1 or re.search(rf"\b{re.escape(ai)}\b", cur["text"], re.I)
-                       or named_ai_before(r["context_turns"], cur["speaker"], ai)):
+    called = any(w.lower() == ai.lower() for _, _, w, _, _ in calling_spots(cur["text"]))  # not "I asked Higgs yesterday"
+    if not parsed and (len(r["people"]) == 1 or called or named_ai_before(r["context_turns"], cur["speaker"], ai)):
         # every judge request failed (a Higgs hiccup): a line put to the AI is answered, not dropped as "nothing
         # asked" ("Higgs." [pause] "Quick one, how long can the video be?" went unanswered, 0 votes)
         return True, {"reading": {"to": "me", **({"wrong": True} if wrong else {})}, "why": "asked me (judge unavailable)",
@@ -1621,7 +1621,7 @@ class ImprovedBrain:
         if not VOICE_RT:
             return None
         if self.reader is None or self.reader.closed:
-            self.reader = Pool(READER, 3 if ONEHOP else 2, cfg={"output_modalities": ["audio"], "audio": {"output": {"voice": VOICE}}})
+            self.reader = Pool(READER, 2, cfg={"output_modalities": ["audio"], "audio": {"output": {"voice": VOICE}}})
         return self.reader
 
     def point(self):
