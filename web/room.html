@@ -66,6 +66,11 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
 .tile.ai video { opacity: 0; transition: opacity .15s; }
 .tile.ai.idle-on video.idle, .tile.ai.av-on video.live { opacity: 1; }
 .tile.ai.idle-on .orb, .tile.ai.av-on .orb { visibility: hidden; }
+/* live face (LiveKit): over the rendered/idle videos */
+.tile.ai video.lk { object-position: center 30%; }
+.tile.ai.lk-on video.lk { opacity: 1; }
+.tile.ai.lk-on video.idle, .tile.ai.lk-on video.live { opacity: 0; }
+.tile.ai.lk-on .orb { visibility: hidden; }
 .tile.ai .badge { position: absolute; left: 8px; top: 8px; font-size: 12px; font-weight: 650; padding: 2px 9px; border-radius: 99px; background: rgba(0,0,0,.55); border: 1px solid var(--line); color: var(--muted); }
 .tile.ai .badge.improved { color: var(--ok); border-color: var(--ok); }
 .tile.ai .status { position: absolute; right: 8px; top: 8px; font-size: 12px; padding: 2px 9px; border-radius: 99px; background: rgba(0,0,0,.55); color: var(--muted); }
@@ -200,6 +205,7 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
   </footer>
 </section>
 <div id="toasts"></div>
+<div id="lkaudio" hidden></div>
 <script src="/agendas.js"></script>
 <script src="/room.js"></script>
 </body>
