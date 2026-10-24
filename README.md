@@ -150,8 +150,9 @@ joins it subscribe-only (a token in the `live_avatar` message) and plays both on
 socket audio. The call itself (people's audio and cameras) stays on Meet's own sockets.
 
 - **Faster replies:** with real Higgs (`tests/live_avatar_e2e.py`, one-to-one, 4 questions per mode) the face is
-  heard 2.6–3.3 s after the question in improved (2026-10-24: the reply is sent 1.43–1.86 s after it, then the
-  avatar's own 1.3–1.7 s; the rendered face: 3.7–5.0 s, 5–6.6 s for long answers) and 2.4–3.0 s in default.
+  heard 2.55–3.1 s after the question in improved (2026-10-24 with one hop, median 2.77 s; it was 2.9–3.2 s, median
+  3.07 s, before: the reply is sent 1.32–1.39 s after the question, then the avatar's own 1.2–1.7 s; the rendered
+  face: 3.7–5.0 s, 5–6.6 s for long answers) and 2.4–3.0 s in default.
   Session start: ~1.3–1.7 s after the switch. `tests/live_avatar_lag.py`: the avatar's lag is the same for a new
   utterance, a burst pushed all at once, and a stream kept open with silence, so it can't be pushed away from here.
 - **While it catches up:** the AI tile glows from Higgs's decision until the face starts talking (with the face on,
