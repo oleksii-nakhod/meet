@@ -52,6 +52,9 @@ async def main():
         print(f"session start {await av.start():.2f} s", flush=True)
         av.task.cancel()  # this probe drives the output itself
         out = av.out
+        started = []  # does the avatar say when it starts playing? (lk.playback_started, an optional RPC)
+        av.room.local_participant.register_rpc_method(
+            "lk.playback_started", lambda data: started.append(time.perf_counter()) or "")
         vw = Viewer(av.avatar_identity)
         v = av.viewer("lag")
         await vw.join(v["url"], v["token"])
@@ -70,13 +73,18 @@ async def main():
             at = await push(out, pcm, marks=(0, 2 * SR))
             out.flush()
             await asyncio.sleep(2.5)
-            res["inside"].append(onset(vw.audio, at[2 * SR]) - at[2 * SR])
+            # the second tone's lag inside one utterance: its heard onset (after the heard 1 s gap) minus its push
+            on1 = onset(vw.audio, at[0])
+            quiet = next((t for t, r in vw.audio if t > on1 + 0.9 and r < 300), None)
+            on2 = onset(vw.audio, quiet) if quiet else None
+            res["inside"].append(on2 - at[2 * SR] if on2 else float("nan"))
             pcm = np.concatenate([np.zeros(3 * SR, np.int16), tone(1.0)])
             at = await push(out, pcm, marks=(3 * SR,))
             out.flush()
             await asyncio.sleep(2.5)
             res["warm"].append(onset(vw.audio, at[3 * SR]) - at[3 * SR])
-            print({k: [round(x, 3) for x in v] for k, v in res.items()}, flush=True)
+            print({k: [round(x, 3) for x in v] for k, v in res.items()}, f"size {live_avatar.SIZE}",
+                  f"playback_started RPCs: {len(started)}", flush=True)
         for x in vw.tasks:
             x.cancel()
         await vw.room.disconnect()

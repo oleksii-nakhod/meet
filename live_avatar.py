@@ -39,6 +39,9 @@ END_GAP = 0.3  # no frame for this long: the utterance is over (the avatar goes 
 # pages mute it themselves on ai_flush for DRAIN s. Its playback_finished RPC comes within ~0.1 s of the last sound,
 # which keeps `lag` (push -> heard) measured (2026-10-23, tests/live_avatar_probe.py).
 LAG0, DRAIN = 1.3, 1.25
+# video size. 2026-10-24: only 480x640 got a session; 240x320 and 360x480 were refused as "no capacity" (429) while
+# 480x640 started at once, so a smaller video is no way to a shorter lag (tests/live_avatar_lag.py)
+SIZE = tuple(int(x) for x in os.environ.get("MEET_LIVE_AVATAR_SIZE", "480x640").split("x"))
 
 
 def settings():
@@ -93,7 +96,7 @@ class LiveAvatar:
     async def start(self, timeout=40.0):
         t0 = time.perf_counter()
         ttl = MAX_S + 600
-        body = {"avatar_id": AVATAR_ID, "max_duration_seconds": MAX_S, "output": {"width": 480, "height": 640},
+        body = {"avatar_id": AVATAR_ID, "max_duration_seconds": MAX_S, "output": {"width": SIZE[0], "height": SIZE[1]},
                 "transport": {"type": "livekit", "url": self.cfg["LIVEKIT_URL"], "room_name": self.room_name,
                               "participant_token": token(self.cfg, self.room_name, self.avatar_identity, publish=True,
                                                          subscribe=False, ttl=ttl, on_behalf=self.agent_identity),
