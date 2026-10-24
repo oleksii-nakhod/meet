@@ -156,6 +156,7 @@ function onMessage(e) {
   else if (m.type === "ai_state") onAiState(m);
   else if (m.type === "line") addLine(m);
   else if (m.type === "ai_note") toast(m.text, "mode");
+  else if (m.type === "ai_error" && /avatar/.test(m.error)) { W.errors.push(m.error); toast(m.error); }
   else if (m.type === "ai_say") aiSay(m.text);
   else if (m.type === "lab") lab(m);
   else if (m.type === "script") setStep(m.step, false);

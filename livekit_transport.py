@@ -214,19 +214,25 @@ class LiveKitBridge:
                 timeout=aiohttp.ClientTimeout(total=60),
                 connector=connector,
             )
-        async with self._http.post(
-            f"{BOSON_BASE}/avatar/sessions",
-            json=payload,
-            headers={"Idempotency-Key": str(uuid.uuid4())},
-        ) as response:
-            text = await response.text()
-            try:
-                data = json.loads(text)
-            except json.JSONDecodeError:
-                data = {"error": text[:300]}
-            if response.status not in (200, 201) or data.get("status") != "active" or not data.get("id"):
-                raise RuntimeError(f"Boson avatar HTTP {response.status}: {data.get('error', data)}")
-            self.avatar_session_id = str(data["id"])
+        # A session that was just deleted (avatar toggled off and on, a rejoin) still counts against the key for a few
+        # seconds and the next create gets HTTP 429, so wait and retry as avatar.render does.
+        for attempt in range(8):
+            async with self._http.post(
+                f"{BOSON_BASE}/avatar/sessions",
+                json=payload,
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            ) as response:
+                status, text = response.status, await response.text()
+            if status != 429:
+                break
+            await asyncio.sleep(0.5 + 0.5 * attempt)
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = {"error": text[:300]}
+        if status not in (200, 201) or data.get("status") != "active" or not data.get("id"):
+            raise RuntimeError(f"Boson avatar HTTP {status}: {data.get('error', data)}")
+        self.avatar_session_id = str(data["id"])
         self.to_avatar = DataStreamAudioOutput(
             room=self.rtc_room,
             destination_identity=AVATAR_IDENTITY,
