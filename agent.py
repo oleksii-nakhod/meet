@@ -1076,11 +1076,13 @@ class RealtimeSpeaker:
 
     async def _run(self):
         text = self.text.strip()
-        late = {"v": False}
+        late, marks = {"v": False}, {}
         task = asyncio.ensure_future(self.pool.speak(
-            text, lambda b: None if late["v"] else self.audio.extend(b), lambda: self.cancelled or late["v"]))
+            text, lambda b: None if late["v"] else self.audio.extend(b), lambda: self.cancelled or late["v"], marks=marks))
         t0 = time.perf_counter()
         while not task.done() and not self.audio and time.perf_counter() - t0 < RT_FIRST_S:
+            if "session" not in marks and time.perf_counter() - t0 > 0.3:
+                break  # no voice session free (still opening: the voice check throttles them): TTS 3 now, not in 2 s
             await asyncio.sleep(0.03)
         if not task.done() and not self.audio:  # too slow to start: don't keep the room waiting
             late["v"] = True
