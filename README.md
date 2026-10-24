@@ -57,7 +57,10 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
     a roommate): the person at the mic is the loudest voice on it, so each person's speaking level is learned from
     their own speech and anything more than 15 dB below it is not them (`MEET_VOICE_GATE_DB`, 0 = off). With a
     nonstop voice 20 dB down on Alex's mic (`tests/scenarios.py --only tv_1to1`): 4 lines heard and 5/5 steps right,
-    against 22 lines (mostly the TV, glued onto Alex's questions) and 3/5 without it.
+    against 22 lines (mostly the TV, glued onto Alex's questions) and 3/5 without it. A sudden rise of the learned
+    level is provisional: it stays if the louder voice keeps coming for 1 s (the TV was on before they spoke), and is
+    undone if 1 s of voice at the old level is dropped first (a laugh or a bump on the mic had locked the person out
+    for good). A lasting drop of their own voice (moving away from the mic) still reads as background.
   - **Line end:** a line ends after 0.30 s of silence when the per-person turn-taking model (VAP) agrees the person
     is done; mid-thought pauses get held. If the person goes on, the pieces merge into one line (the transcript
     panel replaces the fragment).

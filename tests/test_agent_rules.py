@@ -142,6 +142,51 @@ def test_voice_gate_when_the_tv_was_first():
     assert not g(True, -45.0) or not g(True, -45.0) or not g(True, -45.0)  # and the TV is dropped again
 
 
+def talk(g, db, seconds):
+    """`seconds` of one voice at `db` dB through the gate: how many of its frames passed, and whether it retuned."""
+    passed = retuned = 0
+    for _ in range(round(seconds / 0.02)):
+        passed += g(True, db)
+        retuned += g.retuned
+    return passed, retuned
+
+
+def test_voice_gate_recovers_from_a_laugh():
+    # a laugh, a shout or a bump on the mic, 18 dB above their voice, took over as "their" level, and their normal
+    # voice was background from then on, for good (nothing they said passed, so nothing could pull the level back)
+    g = agent.VoiceGate(gate_db=15)
+    talk(g, -30.0, 20)
+    talk(g, -12.0, 0.6)
+    reverted = False
+    for k in range(150):
+        ok = g(True, -30.0)
+        if g.reverted:
+            reverted = True
+            assert ok and not g.background  # the frame that showed it is theirs, not blanked
+    assert reverted
+    passed, _ = talk(g, -30.0, 3)
+    assert passed == 150           # heard again after ~1 s
+    assert abs(g.level - (-30.0)) < 1
+    assert talk(g, -50.0, 2)[0] <= 2  # and a background voice is still dropped
+
+
+def test_voice_gate_recovers_from_an_early_laugh():
+    # the same in the first second of the call, when a laugh outweighs their speech in the learned level
+    g = agent.VoiceGate(gate_db=15)
+    talk(g, -30.0, 0.5)
+    talk(g, -12.0, 1.0)
+    passed, _ = talk(g, -30.0, 3)
+    assert passed >= 100 and abs(g.level - (-30.0)) < 1
+
+
+def test_voice_gate_restarts_the_line_only_when_the_level_moves():
+    # a burst 12 dB up left the level where it was but still said "retuned", and the line so far was thrown away
+    g = agent.VoiceGate(gate_db=15)
+    talk(g, -30.0, 20)
+    _, retuned = talk(g, -18.0, 0.6)
+    assert retuned == 0 and abs(g.level - (-30.0)) < 1
+
+
 def test_voice_gate_off():
     g = agent.VoiceGate(gate_db=0)
     for _ in range(50):

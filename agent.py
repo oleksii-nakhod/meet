@@ -478,7 +478,12 @@ class VoiceGate:
     minutes of background can't pull the level down to its own. If the background came first (so its level was
     learned), a voice 2/3 gate_db louder in most of half a second takes over at once and `retuned` is set. Frames are compared by
     their loudest neighbour (60 ms), so the quiet ends of the person's own words aren't cut. `background` says whether
-    the latest frame was such a voice: the Listener sends silence in its place to transcription."""
+    the latest frame was such a voice: the Listener sends silence in its place to transcription.
+    A sudden rise of the level (2/3 gate_db) is provisional: CONFIRM frames passing at the new level keep it, CONFIRM
+    frames dropped first undo it (`reverted`). A laugh, a shout or a bump on the mic 16+ dB up took over otherwise, and
+    the person's own voice was background from then on, for good: nothing of it passed, so nothing pulled the level back."""
+
+    CONFIRM = 50  # 1 s of voice
 
     def __init__(self, gate_db=VOICE_GATE_DB, min_frames=25, keep=3000):
         self.gate_db, self.min_frames = gate_db, min_frames
@@ -489,32 +494,64 @@ class VoiceGate:
         self.n = 0                       # frames that passed
         self.background = False          # the latest frame was a background voice
         self.retuned = False             # the latest frame showed the level learned so far was the background's
+        self.reverted = False            # the latest frame undid a rise of the level (it was a laugh, not the person)
         self.louder = deque(maxlen=25)   # of the last voiced frames: far louder than the level?
+        self.before = None               # [level before a sudden rise, frames passed since, frames dropped since]
 
     def __call__(self, voiced, db):
         """voiced: the VAD's verdict for this frame; db: its level. Returns the verdict after the gate."""
         self.recent.append(db)
-        self.background = self.retuned = False
+        self.background = self.retuned = self.reverted = False
         if not voiced:
             return False
         loud = max(self.recent)
         if self.gate_db > 0 and self.level is not None and loud < self.level - self.gate_db:
-            self.dropped += 1
-            self.background = True
-            return False
+            if self.before is not None:
+                self.before[2] += 1
+                if self.before[2] >= self.CONFIRM:
+                    self._revert()  # then this frame is judged again against the old level
+            if not self.reverted or loud < self.level - self.gate_db:
+                self.dropped += 1
+                self.background = True
+                return False
         self.hist.append(loud)
         self.n += 1
+        if self.before is not None:
+            self.before[1] += 1
+            if self.before[1] >= self.CONFIRM:
+                self.before = None  # the louder voice kept coming: it is the person
         # most of the last half second far louder than the level learned: that was the background (on before they spoke)
         self.louder.append(self.level is not None and loud > self.level + self.gate_db * 2 / 3)
         if sum(self.louder) >= 15:
             keep = [x for x in self.hist if x >= loud - self.gate_db]
             self.hist.clear()
             self.hist.extend(keep)
-            self.level, self.retuned = float(np.percentile(self.hist, 90)), True
             self.louder.clear()
+            # only a level that moved means the line so far was the background's (a burst that didn't move it restarted
+            # the line anyway, and what they'd said so far was lost)
+            self.retuned = self._learn()
         elif len(self.hist) >= self.min_frames and (self.level is None or self.n % 10 == 0):  # every 0.2 s of speech
-            self.level = float(np.percentile(self.hist, 90))
+            self._learn()
         return True
+
+    def _learn(self):
+        """Set the level from the frames that passed. True if it rose suddenly (then the rise is provisional)."""
+        old, self.level = self.level, float(np.percentile(self.hist, 90))
+        if old is None or self.level - old < self.gate_db * 2 / 3:
+            return False
+        if self.before is None:
+            self.before = [old, 0, 0]
+        return True
+
+    def _revert(self):
+        """The voice their level rose to stopped, and a voice at the old level was dropped since: back to the old level,
+        forgetting the burst (the hist kept only frames near the burst: it fills again from the person)."""
+        old, self.before = self.before[0], None
+        keep = [x for x in self.hist if x < old + self.gate_db * 2 / 3]
+        self.hist.clear()
+        self.hist.extend(keep)
+        self.level, self.reverted = old, True
+        self.louder.clear()
 
 
 def first_sentence(text, complete_only=False):
@@ -1037,10 +1074,23 @@ class Listener:
         self.gate.settle()
         self.b.a.room.log({"type": "voice_gate", "slot": self.slot, "name": self.name, "event": "took over",
                            "level_db": round(self.voice_gate.level, 1), "streaming": self.streaming})
-        if not self.streaming:
-            return
+        if self.streaming:
+            await self._resend_recent()
+
+    async def _resume_line(self):
+        """A laugh or a bump had raised their level, and the last second of their own voice went to transcription as
+        silence (its line may have ended on it): send that second again, now judged as theirs."""
+        self.b.a.room.log({"type": "voice_gate", "slot": self.slot, "name": self.name, "event": "reverted",
+                           "level_db": round(self.voice_gate.level, 1), "streaming": self.streaming})
+        if not self.streaming:  # tick() would start the line with only the preroll, which is that silence
+            self.streaming = True
+            self.preroll.clear()
+        await self._resend_recent()
+
+    async def _resend_recent(self):
+        """Send the last second again, judged against the level just set (this frame is appended by tick())."""
         floor_db = self.voice_gate.level - self.voice_gate.gate_db
-        for f, db in list(self.recent_in)[:-1]:  # this frame is appended by tick()
+        for f, db in list(self.recent_in)[:-1]:
             await self._append(f if db >= floor_db else np.zeros_like(f))
 
     async def _append(self, pcm):
@@ -1073,6 +1123,8 @@ class Listener:
         self.recent_in.append((pcm, self.db))
         if self.voice_gate.retuned:
             await self._restart_line()
+        elif self.voice_gate.reverted:
+            await self._resume_line()
         if self.speaking:
             self.last_voice = time.perf_counter()
         # continuous speech (gaps under 0.25 s don't break it): a "mm" is short, taking the floor isn't
