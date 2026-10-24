@@ -55,7 +55,13 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
   - **Hearing:** each person has their own transcription session (`language: en` hint), so names are known. Sessions
     reconnect on their own: Higgs closes a Realtime session after 5 minutes without speech, and opens can fail
     under load. Higgs's own voice leaking back through someone's speakers (more than 25 dB below what it is playing)
-    is ignored, so it neither interrupts Higgs nor becomes a line.
+    is ignored, so it neither interrupts Higgs nor becomes a line. Two people in one room (2026-10-24): a line
+    mostly the same as another person's from the last 2.5 s is their speech on the other mic; the copy 6 dB louder
+    is who said it, whichever was transcribed first (the other is dropped, or the earlier one re-attributed: its
+    history entry, its reply, its place on the transcript panel; logged `bleed`; `scenarios.py same_room`). Names and
+    codes from the fact sheet that STT misheard are put back ("Mr. O'Keffe" → "Mrs. Okafor", "K512" → "PAY-512"),
+    so Higgs doesn't "correct" people for its own mishearing (`fix_terms`; days, months and numbers are left alone;
+    `tests/fact_cases.py` 8/9 → 9/9).
   - **Line end:** a line ends after 0.30 s of silence when the per-person turn-taking model (VAP) agrees the person
     is done; mid-thought pauses get held. If the person goes on, the pieces merge into one line (the transcript
     panel replaces the fragment).
@@ -97,7 +103,10 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
     A/B, same code, both at once (12 scenes): 41/41 each, reply heard median 2.42 → 1.82 s, p90 4.09 → 3.67 s;
     `tests/writer_cases.py --versions v2 hop`: the same facts, corrections and summaries. `MEET_ONEHOP=0`: write,
     then read, with reading started as soon as the draft is complete and passes the checks, while the judge still
-    decides (`MEET_EARLY_READ`; vs the code before: first audio 1.92 → 1.51 s, p90 3.94 → 2.42 s). `MEET_SPEECH=tts`
+    decides (`MEET_EARLY_READ`; vs the code before: first audio 1.92 → 1.51 s, p90 3.94 → 2.42 s). Pools replace
+    sessions about to age out in the background, so the first answer after a quiet stretch doesn't wait for a new
+    one; a reading with no free voice session within 0.3 s (they open slowly at the start of a call) is voiced by
+    TTS 3 at once instead of after 2 s (first answers in a fresh group call 3.7 → 1.6–2.0 s). `MEET_SPEECH=tts`
     goes back to TTS 3 sentence by sentence, which starts on the draft's first sentence: without the face, replies
     were heard ~0.2–0.3 s sooner that way (`./run.sh check`, 2026-10-23: ~1.3–1.4 s vs ~1.6–1.7 s after the line).
   - **Taking the floor:** a reply starts only when the room has been quiet for 0.35 s and nobody who just spoke
