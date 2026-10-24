@@ -615,7 +615,7 @@ EARLY_READ = os.environ.get("MEET_EARLY_READ", "1") == "1"
 # One hop (MEET_ONEHOP): a speculated reply is answered in audio by the writer's own session instead of drafted and then
 # read (first audio ~0.4 s sooner); its first sentence passes the same checks before it may play, else the text draft
 # is read after all. HOP_WAIT: how long after the decision a one-hop answer may take to have its first sentence.
-ONEHOP = os.environ.get("MEET_ONEHOP", "0") == "1"
+ONEHOP = os.environ.get("MEET_ONEHOP", "1") == "1"
 HOP_WAIT = 1.2
 RT_FIRST_S = 2.0   # no Realtime speech this long after asking (~0.6 s normally; a voice session still opening under
 #                    load took 12 s): TTS 3 voices the reply instead
