@@ -663,8 +663,9 @@ async def hedged(task, again, delay):
     """task's result, or that of again() started after `delay` s if it finishes first (Higgs latency has a long tail:
     2.6-3.3 s drafts in the scenario runs, against ~0.5 s usually). An empty result waits for the other one."""
     done, _ = await asyncio.wait({task}, timeout=delay)
-    if done:
+    if done and task.exception() is None and task.result():
         return task.result()
+    # slow, or it came back empty or failed (then at once: a question went unanswered as "no draft" 0.6 s after it)
     other = asyncio.ensure_future(again())
     pending = {task, other}
     while pending:
@@ -2284,7 +2285,7 @@ class ImprovedBrain:
                 head = t
             if sp.finished or (head is not None and r.audio):
                 r.marks["first"] = time.perf_counter()
-                return (t if sp.finished else head) or None
+                return (t if sp.finished else head) or no("empty")  # finished saying nothing transcribed
             await asyncio.sleep(0.02)
         t = sp.text.strip().strip('"')
         if r.audio and len(re.findall(r"[A-Za-z0-9']+", t)) >= 3 and not sp.failed:
