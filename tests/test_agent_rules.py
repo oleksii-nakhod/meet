@@ -147,6 +147,9 @@ def test_echoes():
     line = "I'm not asking for the moon here. It's one stop. Assistant, please, just add the stop for me."
     assert agent.echoes("Marcus, I'm not asking for the moon here. It's one stop.", line)
     assert not agent.echoes("Done: I added the record shop as a stop on your route.", line)
+    # an answer reusing the question's words isn't speaking as them (it was dropped as 'no draft', pause_1to1)
+    assert not agent.echoes("Using the avatar in the intro is a great idea.",
+                            "What do you think about using the avatar in the intro.")
 
 
 def test_facts_relevant():

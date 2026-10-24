@@ -799,7 +799,7 @@ def vocative_only(text, ai):
             and re.search(r"\b(right|yeah|okay|ok|yes|got that|caught (all )?(of )?that|follow(ing)?)\s*\?\s*$", text.lower()) is not None)
 
 
-def echoes(reply, line, run=6):
+def echoes(reply, line, run=8):
     """True if the reply repeats `run`+ consecutive words of the line it answers (it's speaking as that person)."""
     w = lambda x: re.findall(r"[a-z0-9']+", x.lower())  # noqa: E731
     a, b = w(reply), " ".join(w(line))
@@ -1958,6 +1958,7 @@ class ImprovedBrain:
             cdraft.add_done_callback(lambda f: f.exception())
         if convo_used is not convo:
             writer = pools["write"]
+        empty_why = None  # why `ans` ended up empty, if not a failed request
         hop_text = await self._hop_first(spec) if spec is not None and spec.hop else None
         if spec is not None and spec.hop and hop_text is None:  # too slow, failed, or nothing said: write, then read
             spec.speaker.cancel()
@@ -1976,7 +1977,7 @@ class ImprovedBrain:
                                     f"continue {li.name}'s words.]\n" + convo_used, retries=1)).strip().strip('"')
             ans = re.sub(rf"^\s*{re.escape(a.ai)}\s*:\s*", "", ans, flags=re.I)
             if echoes(ans, text):
-                ans = ""  # still not a reply: better silent than speaking as one of the people
+                ans, empty_why = "", "echoed the speaker"  # still not a reply: better silent than speaking as them
             t_draft = time.perf_counter()
         if VOLUNTEERS.search(ans):  # "I can handle the backend": it's an AI in a call, it can't
             if spec:
@@ -2022,7 +2023,7 @@ class ImprovedBrain:
         correcting = BARGE and why.get("wrong")  # a correction is said even if people have moved on
         # a question put to the AI (by name, one-to-one) gets its answer even if it's the same as before ("I said,
         # Higgs, what do you think?"): 14 of 32 repeat skips in the 2026-10-23 calls were direct questions
-        skip = ("no draft (Higgs request failed)" if not ans else "repeat" if repeats(ans, mine) and not addressed
+        skip = ((empty_why or "no draft (Higgs request failed)") if not ans else "repeat" if repeats(ans, mine) and not addressed
                 # the same correction again in this meeting (the soak: 5 times in 20 min) is nagging, unless asked
                 else "corrected already" if why.get("wrong") and not addressed and repeats(ans, self.corrected, 0.6)
                 else "someone spoke since" if not correcting and line_id != self.line_no and not (addressed and not any(
