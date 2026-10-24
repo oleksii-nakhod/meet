@@ -110,6 +110,16 @@ def test_vocative_person():
     assert vp("Alexander the Great was fast.", ["Alex"], "Higgs") is None
 
 
+def test_person_called_before():
+    pc = agent.person_called_before
+    ctx = [{"speaker": "Priya", "text": "Alex."}]
+    assert pc(ctx, "Priya", ["Alex"], "Higgs", "Your mic is a bit noisy.") == "Alex"
+    assert pc(ctx, "Sam", ["Alex"], "Higgs", "Your mic is a bit noisy.") is None  # someone else's call
+    assert pc(ctx, "Priya", ["Alex"], "Higgs", "Higgs, is my mic noisy?") is None
+    assert pc([{"speaker": "Priya", "text": "Alex said the mic was noisy yesterday."}], "Priya", ["Alex"], "Higgs",
+              "Is it?") is None
+
+
 def test_echoes():
     line = "I'm not asking for the moon here. It's one stop. Assistant, please, just add the stop for me."
     assert agent.echoes("Marcus, I'm not asking for the moon here. It's one stop.", line)

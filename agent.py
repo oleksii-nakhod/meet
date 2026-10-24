@@ -238,7 +238,9 @@ def judge_rule(d, r, prompt="v4b"):
     ctx, cur = r["context_turns"], r["current_turn"]["text"]
     if len(r["people"]) == 1 and to == "group":
         to = "me"  # one-to-one: there is no group (the 1:1 prompt doesn't offer it; a single vote sometimes says it)
-    who = vocative_person(cur, [p for p in r["people"] if p != r["current_turn"]["speaker"]], r["target_speaker"])
+    others = [p for p in r["people"] if p != r["current_turn"]["speaker"]]
+    who = vocative_person(cur, others, r["target_speaker"]) or person_called_before(
+        ctx, r["current_turn"]["speaker"], others, r["target_speaker"], cur)
     if who:
         to = "person"  # "Alex, I can barely hear you.": said to Alex, however the judge read it
     if (to == "me" and len(r["people"]) > 1 and r["target_speaker"].lower() not in cur.lower()
@@ -684,6 +686,17 @@ def vocative_person(text, people, ai):
                 or re.search(rf",\s*{n}\s*[.?!]*\s*$", text, re.I)):
             return p
     return None
+
+
+def person_called_before(ctx, speaker, people, ai, text):
+    """The person this speaker called by name alone just before ("Alex." [pause] "Your mic is a bit noisy.": STT split
+    the line and the second piece was answered as if said to the AI), unless this piece names the AI."""
+    if not ctx or ctx[-1]["speaker"] != speaker or re.search(rf"\b{re.escape(ai)}\b", text, re.I):
+        return None
+    prev = ctx[-1]["text"]
+    if len(re.findall(r"[A-Za-z']+", prev)) > 3:
+        return None
+    return vocative_person(prev, people, ai)
 
 
 def vocative_only(text, ai):
@@ -1605,6 +1618,11 @@ class ImprovedBrain:
         if kind:  # "mm-hm", "um", "so the, uh,": part of the meeting, but nothing to answer, and it doesn't make a reply
             if kind != "unfinished":  # someone else is waiting for stale; an unfinished line merges with what follows
                 li.gate.settle()
+            if kind == "stop":  # "Higgs, stop!" is too short to count as an interruption while it's said: stop now
+                self._cancel_pending("asked to stop")
+                if self.playing is not None:
+                    await self._interrupt(self.playing, li)
+                self._drop_paused()
             await a.line(li.slot, li.name, text, {"speak": False, "why": kind, "decided_s": 0.0}, merged)
             return
         self.line_no += 1
