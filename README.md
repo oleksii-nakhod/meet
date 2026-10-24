@@ -64,10 +64,14 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
     explicit one-to-one mode) on every line, 3 judge samples + 3 fact-checks. It decides as soon as 2 of 3 judges say
     speak; a failed Higgs request is an abstention, not a "no".
   - **Writing:** the reply is drafted while the judge decides, and when the line looks like it wants a reply (one-to-one,
-    the AI's name, a question) its speech starts streaming then too. The writer gets the fact sheet only when the line
+    the AI's name, a question) its speech starts then too. The writer gets the fact sheet only when the line
     is about it (it recited it in small talk otherwise); a correction has its own draft; a slow draft gets a second
     request after 0.5 s; an interrupted turn is marked `[interrupted]` in the history so the next reply answers the
     interruption.
+  - **Speaking:** a Realtime session reads the finished draft aloud in the same preset voice, face on or off
+    (`MEET_SPEECH`, default `realtime`); TTS 3 takes over if Realtime hasn't started within 2 s. `MEET_SPEECH=tts`
+    goes back to TTS 3 sentence by sentence, which starts on the draft's first sentence: without the face, replies
+    were heard ~0.2–0.3 s sooner that way (`./run.sh check`, 2026-10-23: ~1.3–1.4 s vs ~1.6–1.7 s after the line).
   - **Taking the floor:** a reply starts only when the room has been quiet for 0.35 s and nobody who just spoke
     still holds the floor. It is dropped if someone spoke after its line, or if it couldn't start within 3.5 s while
     people kept talking (8 s in a quiet room). Every reply that was decided but not spoken logs `reply_skipped`.
@@ -83,12 +87,12 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
     line ended, kept going for 4.7 s while talked over, and didn't cut in on a long correct line (8 checks, all
     false); `./run.sh check` unchanged (19/19). `MEET_BARGE=0` restores waiting for a gap and yielding.
 - **Avatar** (both modes, off by default; the face is the uncropped Boson docs portrait). Improved: a reply is voiced
-  by a Realtime session reading the writer's text (its whole speech exists sooner than with TTS 3: ~1.5 s vs ~2.0 s
+  by the Realtime reader as without the face (its whole speech exists sooner than with TTS 3: ~1.5 s vs ~2.0 s
   for one sentence, ~2.7 s vs ~5.7 s for three; TTS 3 takes over if Realtime hasn't started within 2 s), Higgs Avatar
   renders it into a buffer, and video and audio are released together when the floor opens. A long reply renders in
   two parts: its first >= 5.5 s as soon as that much speech exists, then the rest (as in the Read My Lips prototype; Chromium
   and Firefox play both renders as one stream). Replies are normal length again (they were one sentence with TTS 3;
-  `MEET_AVATAR_VOICE=tts` goes back to that). A pre-rendered "Hmm." in the same face and voice plays ~1.5–2.4 s after
+  `MEET_SPEECH=tts` goes back to that). A pre-rendered "Hmm." in the same face and voice plays ~1.5–2.4 s after
   the line while it renders (`MEET_AVATAR_FILLER=0` turns it off); the answer's face starts 3.7–5.0 s after the line
   (2026-10-23, `--set 3`, 12/12; 9–15 s answers ~5–6.6 s). Only someone taking the floor (0.8 s of speech) cancels a
   reply while its face renders; a "mm" doesn't. Default: each whole Realtime reply is held until its face renders
@@ -161,7 +165,8 @@ Env: `MEET_SAMPLES` (judge samples per line; default 1 in a one-to-one call, 3 w
 (Higgs requests per server run, default 30000; the room is told when it runs out), `MEET_PROMPT` (judge, default
 `v5`), `MEET_LINE_SILENCE` (0.30), `MEET_ECHO_DB` (25), `MEET_SPECULATE` (1), `MEET_LANG` (en), `MEET_SPARE_SIGNALS`
 (2 preloaded turn-taking model processes), `MEET_SIGNALS=0` (no per-person turn-taking models: timing falls back to
-silence rules), `MEET_VOICE`, `MEET_STT_FALLBACK=0` (no local transcription when Higgs STT fails: on 2026-10-23 it answered most lines with "the transcription is not available right now" after ~3 s, so faster-whisper base.en transcribes a line Higgs hasn't within `MEET_STT_WAIT` = 1.0 s; logged as `stt_fallback`).
+silence rules), `MEET_VOICE` (preset voice, default `chloe`), `MEET_SPEECH` (`realtime` or `tts`, see Speaking),
+`MEET_STT_FALLBACK=0` (no local transcription when Higgs STT fails: on 2026-10-23 it answered most lines with "the transcription is not available right now" after ~3 s, so faster-whisper base.en transcribes a line Higgs hasn't within `MEET_STT_WAIT` = 1.0 s; logged as `stt_fallback`).
 
 ## Running it for real (2026-10-23 notes)
 

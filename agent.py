@@ -419,10 +419,11 @@ async def hedged(task, again, delay):
 
 
 AVATAR_FILLER = os.environ.get("MEET_AVATAR_FILLER", "1") == "1"  # "Hmm." while the face renders (see _release)
-# With the face on, improved replies are voiced by a Realtime session reading the text (the face can only render once
+# Improved replies are voiced by a Realtime session reading the text, face on or off (the face can only render once
 # the speech exists, and Realtime has it sooner: complete in ~1.5 s for one sentence vs ~2.0 s with TTS 3, ~2.7 s vs
-# ~5.7 s for three; word for word 6/6, 2026-10-23). MEET_AVATAR_VOICE=tts goes back to TTS 3 and one-sentence replies.
-AVATAR_RT = os.environ.get("MEET_AVATAR_VOICE", "realtime") == "realtime"
+# ~5.7 s for three; word for word 6/6, 2026-10-23). MEET_SPEECH=tts goes back to TTS 3 (one-sentence replies with the
+# face on); MEET_AVATAR_VOICE is the old name.
+VOICE_RT = os.environ.get("MEET_SPEECH", os.environ.get("MEET_AVATAR_VOICE", "realtime")) == "realtime"
 READER = ("You are a text-to-speech engine. Read the user's text aloud exactly as written, word for word, in a natural "
           "conversational voice. Say nothing else: no greeting, no comment, no question.")
 SPLIT_MIN_S = 5.5  # render the first >= 5.5 s of a long reply first (Read My Lips: the second part's face is ready in time)
@@ -1089,8 +1090,8 @@ class Listener:
 
 
 class Reply:
-    """A reply being voiced (TTS 3, sentence by sentence). Given `text` it is complete at once; given None, its text
-    streams in through feed() (spoken while it arrives) until close()."""
+    """A reply being voiced (a Realtime session reading it whole, or TTS 3 sentence by sentence). Given `text` it is
+    complete at once; given None, its text streams in through feed() until close()."""
 
     def __init__(self, line_id, listener, line_text, text, t_end, one=False, ai=None, reader=None):
         self.line_id, self.listener, self.line_text, self.t_end = line_id, listener, line_text, t_end
@@ -1112,7 +1113,7 @@ class Reply:
         self.cancel = False
         self.started = False     # first audio frame sent
         self.marks = {"created": time.perf_counter()}  # when each stage finished (perf_counter), for timing logs
-        self.rt = reader is not None  # voiced by a Realtime session (Avatar on), not TTS 3
+        self.rt = reader is not None  # voiced by a Realtime session, not TTS 3
         done = lambda: setattr(self, "done", True)  # noqa: E731
         self.speaker = RealtimeSpeaker(reader, self.audio, done) if self.rt else SentenceSpeaker(VOICE, self.audio, done)
         if text is not None:
@@ -1172,11 +1173,11 @@ class ImprovedBrain:
         self.voice_at = 0.0       # perf_counter when anyone last made a sound
         self.line_by = {}         # line id -> slot of who said it
         self.out_db = deque([-90.0], maxlen=30)  # Higgs's output level over the last 0.6 s (echo gate)
-        self.reader = None        # Pool of Realtime voice sessions for replies with the face on (opened on first use)
+        self.reader = None        # Pool of Realtime voice sessions for replies (opened on first use)
 
     def voice(self):
-        """The reader pool when the face is on and Realtime voices it, else None (TTS 3)."""
-        if not (self.a.avatar and AVATAR_RT):
+        """The reader pool when Realtime voices replies, else None (TTS 3)."""
+        if not VOICE_RT:
             return None
         if self.reader is None or self.reader.closed:
             self.reader = Pool(READER, 1, cfg={"output_modalities": ["audio"], "audio": {"output": {"voice": VOICE}}})
@@ -1204,7 +1205,7 @@ class ImprovedBrain:
                 await pool.close()
 
     async def start(self):
-        self.voice()  # avatar on: open the Realtime voice session now, not on the first reply
+        self.voice()  # open the Realtime voice session now, not on the first reply
         await self.on_roster(self.a.room.people())
 
     def dead(self):
