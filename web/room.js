@@ -54,7 +54,8 @@ async function init() {
   $("jname").value = store(localStorage, "meet_name") || "";
   if (info.passcode) { $("jkrow").classList.remove("hidden"); $("jk").value = passcode; }
   agenda = (window.AGENDAS || []).find((a) => a.id === info.agenda) || null;
-  if (agenda) { castButtons(); renderScript(); }
+  castButtons();
+  if (agenda) renderScript();
   $("jform").classList.remove("hidden");
   ($("jname").value ? $("jgo") : $("jname")).focus();
 }
@@ -562,10 +563,14 @@ const EXPECT = { reply: "{ai} answers", silent: "{ai} stays quiet", correct: "{a
   stop: "{ai} stops", any: "either is fine" };
 const subAi = (t) => t.replaceAll("{ai}", aiName);
 
+const EXTRA_CAST = ["Junaid"]; // offered in every room, with no lines in any script
+
 function castButtons() {
   const box = $("jcast").querySelector(".cast");
   box.replaceChildren();
-  for (const name of agenda.cast) {
+  const cast = agenda?.cast || [];
+  if (!agenda) $("jcast").querySelector("label").textContent = "Join as";
+  for (const name of [...cast, ...EXTRA_CAST.filter((n) => !cast.includes(n))]) {
     const b = document.createElement("button");
     b.type = "button"; b.textContent = name;
     b.classList.toggle("cur", $("jname").value.trim().toLowerCase() === name.toLowerCase());
