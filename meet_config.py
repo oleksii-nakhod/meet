@@ -34,7 +34,7 @@ def load_environment() -> None:
             if "=" in line:
                 key, value = line.split("=", 1)
                 key, value = key.strip(), value.strip().strip('"').strip("'")
-                if key in ALLOWED and value:
+                if (key in ALLOWED or key.startswith("MEET_")) and value:   # MEET_* settings too (they were dropped)
                     os.environ.setdefault(key, value)
             elif line.startswith("bai-"):
                 os.environ.setdefault("BOSON_API_KEY", line)
