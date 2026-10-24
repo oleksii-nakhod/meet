@@ -144,13 +144,13 @@ function onMessage(e) {
   bump(W.msgs, m.type);
   if (m.type === "roster") onRoster(m);
   else if (m.type === "chat") addChat(m);
-  else if (m.type === "ai_flush") { mixer.port.postMessage({ flush: 0 }); liveFlush(); }
+  else if (m.type === "ai_flush") { mixer.port.postMessage({ flush: 0 }); liveFlush(); clearTimeout(live.cap); }
   else if (m.type === "ai_gain") { live.gain = Math.max(0, Math.min(1, +m.gain)); mixer.port.postMessage({ gain: live.gain, slot: 0, ramp: 0.03 }); liveVolume(); }
   else if (m.type === "live_avatar") liveAvatar(m);
   else if (m.type === "ai_state") onAiState(m);
   else if (m.type === "line") addLine(m);
   else if (m.type === "ai_note") toast(m.text, "mode");
-  else if (m.type === "ai_say") live.video ? setTimeout(() => aiSay(m.text), 1300) : aiSay(m.text); // with the face's words
+  else if (m.type === "ai_say") live.video ? (live.cap = setTimeout(() => aiSay(m.text), 1300)) : aiSay(m.text); // with the face's words
   else if (m.type === "lab") lab(m);
   else if (m.type === "script") setStep(m.step, false);
 }
@@ -450,7 +450,10 @@ async function liveAvatar(m) {
     if (live.room !== r) { r.disconnect(); return; }
     W.live.connects++; W.live.state = "on";
     r.startAudio().catch(() => {}); // the Join click already allowed sound; if not, the next click does (below)
-  } catch (e) { W.errors.push(`live avatar: ${e.message || e}`); liveOff(); W.live.state = "failed"; }
+  } catch (e) { // a connect that a newer live_avatar message replaced fails on its own: leave the newer one be
+    if (live.info !== m) return;
+    W.errors.push(`live avatar: ${e.message || e}`); liveOff(); W.live.state = "failed";
+  }
 }
 function liveOff() {
   const r = live.room;

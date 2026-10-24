@@ -57,6 +57,15 @@ def test_name_from_local():
     assert f("We talked to Noah yesterday.", "We talked to Nova yesterday.", "Nova", p) == "We talked to Noah yesterday."
     assert f("I think it's a cool name.", "I think Nova is a cool name.", "Nova", p) == "I think it's a cool name."
     assert f("Nova, hi.", "Nova, hi.", "Nova", p) == "Nova, hi."
+    assert f("Okay, hey, what do you think?", "Okay, Higgs's, what do you think?", "Higgs", p).startswith("Okay")  # no raise
+
+
+def test_refusal():
+    for t in ["I'm sorry, Priya. I can't continue this conversation.", "I’m unable to continue this conversation.",
+              "I cannot continue the discussion.", "We can’t continue this chat."]:
+        assert agent.REFUSAL.search(t), t
+    for t in ["I can't continue the demo without the video.", "Let's continue this conversation tomorrow."]:
+        assert not agent.REFUSAL.search(t), t
 
 
 def test_prefilter():

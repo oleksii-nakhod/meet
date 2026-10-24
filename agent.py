@@ -495,7 +495,9 @@ def name_from_local(text, local, ai, people=()):
         return text
     tw = list(re.finditer(r"[A-Za-z0-9][A-Za-z0-9']*", text))
     lw = [w.lower() for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9']*", local)]
-    j = lw.index(ai.lower())
+    j = next((i for i, w in enumerate(lw) if re.fullmatch(rf"{re.escape(ai.lower())}(?:'s|')?", w)), None)
+    if j is None:
+        return text
     for tag, i1, i2, j1, j2 in SequenceMatcher(None, [w.group(0).lower() for w in tw], lw, autojunk=False).get_opcodes():
         if not j1 <= j < j2:
             continue
@@ -558,9 +560,9 @@ STOP_ASK = re.compile(r"^(?:(?:ok(?:ay)?|hey|um|uh)[,.]?\s+)?(?:stop(?: talking)
                       r"enough|one (?:sec|second|moment))[.!]*$", re.I)
 # The writer ending the conversation ("I'm sorry, Priya. I can't continue this conversation." after "are you dumb?"):
 # asked again with STAY; a refusal never goes into the history, which the writer would follow from then on.
-REFUSAL = re.compile(r"\b(?:I|we) (?:can't|cannot|can not|won't|am unable to|'m unable to|'m not able to) (?:continue|keep) "
-                     r"(?:this|the|our) (?:conversation|discussion|chat)|\bI (?:can't|cannot|won't) (?:engage|respond to (?:that|this))\b",
-                     re.I)
+REFUSAL = re.compile(r"\b(?:I|we)(?:\s+am|\s+are|['’]m|['’]re)?\s+(?:can['’]?t|cannot|can not|won['’]t|unable to|not able to)\s+"
+                     r"(?:continue|keep)\s+(?:this|the|our)\s+(?:conversation|discussion|chat)|"
+                     r"\bI\s+(?:can['’]?t|cannot|won['’]t)\s+(?:engage|respond to (?:that|this))\b", re.I)
 CLARIFY = re.compile(r"\b(?:not sure what you mean|(?:could|can) you (?:please )?(?:clarify|repeat|rephrase)|"
                      r"didn't (?:quite )?catch (?:that|it)|what do you mean)\b", re.I)
 STAY = ("[Stay friendly and keep helping. If the remark was rude or strange, answer it lightly in a few words and carry "
@@ -1252,14 +1254,14 @@ class Listener:
                 self.b.on_resume(self)
 
     async def _transcribe(self, t_end, audio=(), cut=None):
-        self.decided_early = False
+        tok = {"decided": False}  # this piece's own count (pieces of one person overlap: "Nova, what...?" + "Oh.")
         try:
-            await self._transcribe_and_decide(t_end, audio, cut)
+            await self._transcribe_and_decide(t_end, audio, cut, tok)
         finally:
-            if not self.decided_early:
+            if not tok["decided"]:
                 self.in_flight = max(0, self.in_flight - 1)
 
-    async def _transcribe_and_decide(self, t_end, audio=(), cut=None):
+    async def _transcribe_and_decide(self, t_end, audio=(), cut=None, tok=None):
         if not spend():
             return
         s = self.session
@@ -1305,9 +1307,12 @@ class Listener:
                 and maybe_named(text, ai, people):
             try:  # Higgs's transcript has no name: what whisper heard (it started with the commit)
                 heard = await asyncio.wait_for(asyncio.shield(named), NAME_WAIT)
-            except asyncio.TimeoutError:
+            except Exception:  # noqa: BLE001  (too slow, or whisper failed: Higgs's transcript as it is)
                 heard = ""
-            fixed = name_from_local(text, heard, ai, people)
+            try:
+                fixed = name_from_local(text, heard, ai, people)
+            except Exception:  # noqa: BLE001
+                fixed = text
             if fixed != text:
                 self.b.a.room.log({"type": "name_fix", "slot": self.slot, "higgs": text, "local": heard, "text": fixed,
                                    "wait_s": round(time.perf_counter() - t0, 2)})
@@ -1315,7 +1320,7 @@ class Listener:
         self.t_transcript = time.perf_counter()
         if text:
             merge, self.merge = self.merge, False
-            await self.b.on_line(self, text, t_end, merge, cut)
+            await self.b.on_line(self, text, t_end, merge, cut, tok)
 
 
 class Reply:
@@ -1484,7 +1489,7 @@ class ImprovedBrain:
         """The same person went on right after a commit: a reply to their half-line waits to hear what they add. A
         "Yeah." or "Oh." keeps it (on_line); anything more replaces it (in the 2026-10-23 calls a trailing "Oh." or
         "Okay." restarted 20 replies, up to 8.8 s late)."""
-        if self.pending and self.pending.listener is li:
+        if self.pending and self.pending.listener is li and not (BARGE and self.pending.correction):
             self.pending.held = li
 
     def moved_on(self, r):
@@ -1563,7 +1568,7 @@ class ImprovedBrain:
         mine = [h["text"] for h in a.history if h["speaker"] == a.ai][-3:]
         # a question put to the AI (by name, one-to-one) gets its answer even if it's the same as before ("I said,
         # Higgs, what do you think?"): 14 of 32 repeat skips in the 2026-10-23 calls were direct questions
-        skip = ("no draft (Higgs request failed)" if not ans else "repeat" if repeats(ans, mine) and not addressed
+        skip = ("no draft (Higgs request failed)" if not ans else "repeat" if repeats(ans, mine)
                 else "echo" if echoes(ans, text) else "a correction is waiting" if self.correcting() else None)
         if skip:  # nothing was said over them: the whole line is judged when it ends (it was "corrected mid-line")
             if li.cut is frag:
@@ -1580,7 +1585,7 @@ class ImprovedBrain:
             r.render = asyncio.ensure_future(self._render(r))
         await a.status("thinking")
 
-    async def on_line(self, li, text, t_end, merge, cut=None):
+    async def on_line(self, li, text, t_end, merge, cut=None, tok=None):
         a = self.a
         if not re.search(r"[A-Za-z]", text):
             return  # "...", or a hum transcribed in another script ("嗯。")
@@ -1590,7 +1595,13 @@ class ImprovedBrain:
         merged = merge and bool(a.history) and a.history[-1]["speaker"] == li.name
         if merged and cut is None:
             tail, tail_kind = prefilter(text, a.ai, [], a.names())
-            if tail_kind in ("skip", "backchannel", "filler") or trivial(tail):
+            if tail_kind == "stop":  # "Higgs, what's X?" + "Wait.": they want quiet, not the answer
+                self._cancel_pending("asked to stop")
+                if self.playing is not None:
+                    await self._interrupt(self.playing, li)
+                self._drop_paused()
+            if tail_kind in ("skip", "backchannel", "filler", "stop") or trivial(tail):
+                li.gate.settle()
                 # "Nova, what can you help with?" + "Oh." / "Okay. Yes.": the same line; its verdict and reply stand
                 prev = a.history[-1]
                 prev["text"] = join_pieces(prev["text"], tail) if tail_kind != "skip" else prev["text"]
@@ -1675,8 +1686,9 @@ class ImprovedBrain:
         if cut_i is not None and why.get("wrong"):
             speak, d["why"] = False, "corrected mid-line"  # Higgs already cut in on it
         t_decided = time.perf_counter()
-        li.in_flight = max(0, li.in_flight - 1)  # decided: a reply waiting on this line may go (or drop)
-        li.decided_early = True
+        if tok is not None and not tok["decided"]:  # decided: a reply waiting on this line may go (or drop)
+            tok["decided"] = True
+            li.in_flight = max(0, li.in_flight - 1)
         await a.line(li.slot, li.name, text, {"speak": speak, "why": d["why"], "reading": why, "votes": d["votes"],
                                               "checks": d["checks"],
                                               "decided_s": round(time.perf_counter() - t_end, 2)}, merged)
@@ -1773,8 +1785,8 @@ class ImprovedBrain:
             self.pending = Reply(line_id, li, text, ans, t_end, reader=reader)
         self.pending.vocative = vocative_only(text, a.ai)
         self.pending.addressed = addressed
-        if li.speaking or li.in_flight:  # they already went on: wait for what they add (on_resume)
-            self.pending.held = li
+        if (li.speaking or li.in_flight) and not (BARGE and self.pending.correction):
+            self.pending.held = li  # they already went on: wait for what they add (on_resume)
         self.pending.correction = bool(why.get("wrong"))
         if a.avatar:  # render ahead, into a buffer: by the time the floor opens the face is (nearly) ready
             self.pending.video = False
@@ -1814,8 +1826,9 @@ class ImprovedBrain:
         if r is not None and "audio" not in r.marks and len(r.audio) >= N * 2:
             r.marks["audio"] = time.perf_counter()
         # start with 200 ms of speech in hand (or the whole reply): TTS sometimes streams slower than it plays
-        if r is not None and r.held is not None and not (r.held.speaking or r.held.in_flight) \
-                and time.perf_counter() - r.held.last_voice > HELD_S:
+        if r is not None and r.held is not None and (
+                (not (r.held.speaking or r.held.in_flight) and time.perf_counter() - r.held.last_voice > HELD_S)
+                or time.perf_counter() - r.t_end > STALE_MAX or r.held not in self.listeners.values()):
             r.held = None  # they went on, but nothing came of it (a cough, too short to be a line)
         if self.playing is None and r is not None and r.closed and r.held is None and (len(r.audio) >= N * 2 * 10
                                                                       or (r.done and len(r.audio) >= N * 2)):

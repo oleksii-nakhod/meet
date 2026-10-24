@@ -219,6 +219,15 @@ def truncate(text, segments, pos_s):
     """What the listeners heard of a reply stopped at playback position `pos_s`: the sentences fully or mostly
     (60 %) played, plus a dash, like the engine's `heard_text(...) + " —"`. segments: [(start_s, end_s, sentence)]
     as SentenceSpeaker records them, converted to seconds. `text` (the full reply) is not needed for the cut, the
-    segments carry the sentences; it is in the signature so callers log what was lost."""
-    heard = " ".join(s for a, b, s in segments if a + 0.6 * (b - a) <= pos_s)
-    return (heard + " —").lstrip()
+    segments carry the sentences; it is in the signature so callers log what was lost. Of the sentence it was cut in,
+    the words played so far (in proportion to its time) are kept if there are 3 or more: cut early in a long first
+    sentence, the reply was remembered as "—", as if nothing had been said."""
+    heard = [s for a, b, s in segments if a + 0.6 * (b - a) <= pos_s]
+    cur = next(((a, b, s) for a, b, s in segments if a <= pos_s < a + 0.6 * (b - a)), None)
+    if cur is not None:
+        a, b, s = cur
+        words = s.split()
+        k = int(len(words) * (pos_s - a) / max(1e-6, b - a))
+        if k >= 3:
+            heard.append(" ".join(words[:k]).rstrip(",;:"))
+    return (" ".join(heard) + " —").lstrip()
