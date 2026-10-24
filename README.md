@@ -119,7 +119,10 @@ A switch on the call, visible to everyone, flips Higgs between two brains:
     earlier one (14 of 32 repeat skips on 2026-10-23 were direct questions); a refusal ("I can't continue this
     conversation.", after "are you dumb?") is re-asked and never enters the history (one locked Nova for the rest
     of a call); a second "could you clarify?" in a row to a garbled line stays unsaid; a summary is given, not
-    promised, and invents no tasks.
+    promised, and invents no tasks; each correction is made once per meeting unless asked (the 20-minute soak
+    corrected the same "twenty seconds" 5 times). Called by name alone ("Hey, Higgs.", "Higgs?") it always
+    answers, briefly ("Yes?", so the request after the pause isn't talked over); when every judge request fails
+    (a Higgs hiccup) a line put to it is answered rather than dropped as "nothing asked".
   - **While Higgs talks:** a listener's "mm-hm" only ducks it. A real interruption stops it, and Higgs remembers
     only what was heard (`floor.py`, ported from `mmhm/engine.py`; 16 unit tests). When what stopped it comes back
     transcribed as a backchannel ("Yeah, yeah, uh-huh, yeah.", "Exactly." — 5 replies were cut off that way on
@@ -207,6 +210,23 @@ twenty-five…". Improved misses: what "E24" means (a question only the fact she
 replies 1.1–2.7 s, all five things it said right (both amounts, what E24 means, the lease section, the rent date); the
 extra "speak" was a garbled "Wren-five." and was dropped unheard. Default the same morning: spoke 24 times, cut off
 by people 36 times.)
+
+### 2026-10-24 (branch `worktree-live-face-2`)
+
+Improved mode, live face on where noted, real Higgs:
+
+| test | result |
+|---|---|
+| `scenarios.py --set all` (37 scenes) | 104/104 (102–104 across runs; the misses were a judge borderline and a quiet −6 dB interruption) |
+| `--set 9` (2026-10-23 edges) / `--set 10` (group turn-taking edges) / `--set 8` (barge-in) | 30/30, 11/11, 5/5 |
+| `--set 3` (avatar, live face) / `--set 7` (five people, drop/rejoin, flips) / `--set 5`, `--set 6` | 15/15, 18/18, 6/6, 9/9 |
+| `--set 4` (past the 5-minute idle timeout) | 6/6 |
+| MSI-Bench through the call (A/B at the same time as main) | 22/24 answered, 1 premature, median 1.35 s (main: 22/24, 0, 1.43 s) |
+| `soak.py --cycles 40 --avatar` (20 min, live face) | 40/40 questions answered, median ~1.75 s, one live session throughout |
+| B2 meeting in 3 Chromium pages with the live face | 26/26 silent, 4/6 speak (the two known misses) |
+| `browser_bc.py --mode improved --avatar` (real Chrome mic) | 8/8 answered, 0/8 backchannels stopped it |
+| `live_avatar_browser.py` / `live_avatar_recover.py` / `fake_room.py` | 13/13, 6/6, 49/49 |
+| live face heard after a question (`live_avatar_e2e.py`) | 2.55–3.1 s, median 2.77 s (was 3.07 s) |
 
 ### Interactive scenarios (2026-10-23, `tests/scenarios.py`)
 
@@ -330,7 +350,10 @@ With Higgs (each makes real API calls; keep to ~3 servers at once, Higgs caps co
     python tests/scenarios.py --set all --modes improved default --par 3   # 37 interactive scenes, bots over /ws/room
     python tests/scenarios.py --set 3     # with the Avatar     --set 4: past Higgs's 5-minute idle timeout
     python tests/live_avatar_e2e.py       # live face: when it is heard after a question, and an interruption
-    python tests/scenarios.py --set 9     # 2026-10-23 edges: trailing "Oh.", repeated questions, rudeness, names, long mm-hms
+    python tests/scenarios.py --set 9     # 2026-10-23 edges: trailing "Oh.", repeated questions, rudeness, names, long mm-hms, same room
+    python tests/scenarios.py --set 10    # group turn-taking: two asking at once, named in the third person, a pause after the name
+    python tests/fact_cases.py            # fact-checks on misheard fact-sheet names vs real mistakes
+    python tests/live_face_shots.py       # screenshots of the live face: idle, thinking, just cut off
     python tests/name_stt.py collect && python tests/name_stt.py score   # the AI's name through Higgs STT (7 voices)
     python tests/onehop_bench.py          # write-then-read vs answering in audio straight from the writer
     python tests/judge_cases.py [--file judge_heldout.jsonl]   # the speak/silent decision on 63 / 120 written lines
