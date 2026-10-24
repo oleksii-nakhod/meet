@@ -62,10 +62,10 @@ The models download from Hugging Face on first use. `ffmpeg` is needed only to r
 
 `./run.sh` is `python server.py --port 8600` with the venv's Python.
 
-The home page has two tabs. **Join a room** takes a room ID or a pasted room link (a link's `?k=` passcode comes
-along); rooms aren't listed, so you join one you were given. **Create a room** (`/#create`) takes an optional room
-ID (letters, digits, `-`, `_`; it becomes the link `/r/<id>`, empty gives a random one); an ID that's already in use,
-ignoring case, is refused. A room nobody has been in for 10 minutes (`MEET_ROOM_IDLE`, seconds; counted from
+The home page has two tabs. **Create a room** (the default) takes an optional room ID at the bottom of the form
+(letters, digits, `-`, `_`; it becomes the link `/r/<id>`, empty gives a random one); an ID that's already in use,
+ignoring case, is refused. **Join a room** (`/#join`) takes a room ID or a pasted room link (a link's `?k=` passcode
+comes along); rooms aren't listed, so you join one you were given. A room nobody has been in for 10 minutes (`MEET_ROOM_IDLE`, seconds; counted from
 creation if nobody joins) is freed: its link stops working and its ID can be used again (its documents stay in
 `data/kb/<id>/`, but a new room with that ID starts without them). Anyone can create rooms unless `MEET_ADMIN` is
 set; `MEET_MAX_ROOMS` (default 100) caps how many exist at once.

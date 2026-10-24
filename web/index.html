@@ -57,18 +57,15 @@ button:disabled { opacity: .5; cursor: default; }
 <main>
   <header><span class="brand">Meet <span>+ Higgs</span></span><span class="sub">a small video call with an AI in the room</span></header>
   <div class="tabs" role="tablist">
-    <button id="tjoin" role="tab" aria-selected="true" aria-controls="joincard">Join a room</button>
-    <button id="tcreate" role="tab" aria-selected="false" aria-controls="form">Create a room</button>
+    <button id="tcreate" role="tab" aria-selected="true" aria-controls="form">Create a room</button>
+    <button id="tjoin" role="tab" aria-selected="false" aria-controls="joincard">Join a room</button>
   </div>
-  <section class="card" id="joincard" role="tabpanel">
+  <section class="card hidden" id="joincard" role="tabpanel">
     <label for="jid" style="margin-top:0">Room ID or link</label>
     <div class="joinrow"><input id="jid" autocomplete="off" spellcheck="false" placeholder="e.g. team-sync"><button id="jgo">Join</button></div>
     <div id="jerr" class="hint bad"></div>
   </section>
-  <section class="card hidden" id="form" role="tabpanel">
-    <label for="rid">Room ID (optional; it's the room's link)</label>
-    <input id="rid" maxlength="64" autocomplete="off" spellcheck="false" placeholder="leave empty for a random one">
-    <div class="hint" id="ridhint"></div>
+  <section class="card" id="form" role="tabpanel">
     <label for="preset">Meeting script</label><select id="preset"></select>
     <div class="pinfo" id="pinfo"></div>
     <label for="title">Room title</label><input id="title" value="Team sync" maxlength="120">
@@ -80,6 +77,9 @@ button:disabled { opacity: .5; cursor: default; }
     <label for="facts">What the AI knows (one fact per line)</label>
     <textarea id="facts">The demo video must be 2 to 3 minutes and show the project running.
 Submissions close Saturday at 3 pm.</textarea>
+    <label for="rid">Room ID (optional; it's the room's link)</label>
+    <input id="rid" maxlength="64" autocomplete="off" spellcheck="false" placeholder="leave empty for a random one">
+    <div class="hint" id="ridhint"></div>
     <div id="adminrow" class="hidden"><label for="admin">Admin token</label><input id="admin" type="password" autocomplete="off"></div>
     <button id="create">Create room</button>
     <div id="err"></div>
@@ -126,15 +126,16 @@ $("preset").value = AGENDAS.some((a) => a.id === local("meet_preset")) || local(
 $("preset").onchange = pick;
 pick();
 
-// Join or create: the tab is in the URL (#create), so a link can open either one.
+// Create (the default) or join: the tab is in the URL (#join), so a link can open either one.
 const show = (tab) => {
   $("tjoin").setAttribute("aria-selected", tab === "join"); $("tcreate").setAttribute("aria-selected", tab === "create");
   $("joincard").classList.toggle("hidden", tab !== "join"); $("form").classList.toggle("hidden", tab !== "create");
-  history.replaceState(null, "", tab === "create" ? "#create" : location.pathname + location.search);
+  history.replaceState(null, "", tab === "join" ? "#join" : location.pathname + location.search);
 };
 $("tjoin").onclick = () => show("join");
 $("tcreate").onclick = () => show("create");
-if (location.hash === "#create") show("create");
+if (location.hash === "#join") show("join");
+window.onhashchange = () => show(location.hash === "#join" ? "join" : "create");
 
 // Join by ID, or by a pasted link (which may carry the passcode). Rooms aren't listed: you need to be given one.
 const ROOM_ID = /^[A-Za-z0-9_-]{1,64}$/;
