@@ -617,6 +617,7 @@ EARLY_READ = os.environ.get("MEET_EARLY_READ", "1") == "1"
 # is read after all. HOP_WAIT: how long after the decision a one-hop answer may take to have its first sentence.
 ONEHOP = os.environ.get("MEET_ONEHOP", "1") == "1"
 HOP_WAIT = 1.2
+HOP_WORDS = 10  # ... or its first 10 words, if the first sentence is longer
 RT_FIRST_S = 2.0   # no Realtime speech this long after asking (~0.6 s normally; a voice session still opening under
 #                    load took 12 s): TTS 3 voices the reply instead
 
@@ -2098,6 +2099,8 @@ class ImprovedBrain:
                 return no("label")  # it said its own label aloud ("Higgs: ..."): the text draft can drop it, speech can't
             t = sp.text.strip().strip('"')
             head = first_sentence(t, complete_only=True)
+            if head is None and len(re.findall(r"[A-Za-z0-9']+", t)) >= HOP_WORDS:
+                head = t  # a long first sentence: enough words to check (an echo is 6 in a row, a label the first)
             if sp.finished or (head is not None and r.audio):
                 r.marks["first"] = time.perf_counter()
                 return (t if sp.finished else head) or None
