@@ -101,8 +101,10 @@ async def main():
             await chat(A, "/flush")
             ok = await wait(B, "meet.live.flushes >= 1 && live.audio.muted === true", 3000)
             check("ai_flush mutes the avatar's audio at once", ok)
-            ok = await wait(B, "live.audio.muted === false", 3000)
-            check("…and unmutes it after the drain", ok)
+            ok = await wait(B, "live.still && document.querySelector('.tile.ai').classList.contains('still-on')", 1000)
+            check("…and covers its lips with a still of it listening", ok, await B.evaluate("live.still"))
+            ok = await wait(B, "live.audio.muted === false && !document.querySelector('.tile.ai').classList.contains('still-on')", 3000)
+            check("…and unmutes it and shows the live face again after the drain", ok)
 
             await A.click("#avatar")
             ok = all([await wait(p, "meet.live.state === 'off' && !document.querySelector('.tile.ai').classList.contains('lk-on')", 10000)

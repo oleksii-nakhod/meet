@@ -56,6 +56,7 @@ SIGNALS = os.environ.get("MEET_SIGNALS", "1") == "1"  # per-person turn-taking m
 STT_FALLBACK = os.environ.get("MEET_STT_FALLBACK", "1") == "1"
 STT_WAIT = float(os.environ.get("MEET_STT_WAIT", "1.0"))
 STT_FAILED = re.compile(r"transcription is not available", re.I)
+WHISPER_JUNK = re.compile(r"^\W*(?:you|thank you|thanks for watching)?\W*$", re.I)
 CALLS = {"n": 0}
 # In 1:1 Mm-hm a commit after 0.1 s of silence is a cancellable guess. Here a committed line is transcribed and judged
 # (7 requests) and shown to everyone, so a line ends only after a real pause: 0.45 s with the turn-taking model
@@ -68,6 +69,10 @@ FLOOR_POLICY = dataclasses.replace(Policy(), min_silence=0.35)  # room quiet bef
 STALE_S = 3.5  # a reply that couldn't start this long after its line, while people kept talking, is about a moment
 STALE_ADDRESSED = 6.0  # an answer to a question put to the AI by name waits longer for a gap
 STALE_MAX = 8.0  # that has passed; in a quiet room it may come later (a slow Higgs request), but not after this
+# A reply stopped by someone whose line then turns out to be a backchannel goes on from the sentence it was cut in, if
+# that line comes within PAUSE_S of the stop (0.3 s line end + STT: ~0.7 s after they stop). MEET_RESUME=0: it doesn't.
+RESUME = os.environ.get("MEET_RESUME", "1") == "1"
+PAUSE_S = 3.0
 HELD_S = 1.2  # a reply held because its speaker went on (on_resume) goes ahead after this much quiet with no new line
 CORRECT = ("[The latest utterance contradicts what you know. Start by correcting it plainly, as {ai}, not as one of "
            "the people.]\n")
@@ -313,11 +318,11 @@ DANGLING = set("the a an to of and but or because if my your our their than um u
 
 
 def backchannel(text):
-    """True for a short listener sound or acknowledgement ("Mm-hm.", "Yeah, yeah.", "Okay.", "Got it."), but not for
+    """True for listener sounds or acknowledgements ("Mm-hm.", "Yeah, yeah.", "Okay.", "Got it.", "Yeah. Yeah. Uh huh. Yeah."), not for
     one asked as a question ("Yeah?", "Right?")."""
     t = text.strip().lower()
     words = re.findall(r"[a-z][a-z'-]*", t)
-    return bool(words) and len(words) <= 3 and not t.endswith("?") and all(w in BACKCHANNEL for w in words)
+    return bool(words) and len(words) <= 6 and not t.endswith("?") and all(w in BACKCHANNEL for w in words)
 
 
 # Words said before the AI's name when calling it ("Hey, hey Noah, how are you?", "Okay, Higgs.", "Morning, all. Nova").
@@ -326,11 +331,26 @@ NAME_LEAD = set("hey hi hello okay ok so and um uh oh well yo morning good thank
 NOT_NAME = set("""no now know knew new next nah not nope note need never so see say says said sure saw yes yeah yep
 yup ok okay well wait what why who how hey hi hello thanks right alright guys folks everyone all hmm um uh oh ah
 maybe make made mike mix makes mind nice nine none nor north noise noon nothing nobody novel
-his hers he high hike highs ideas egg exit exact exactly extra excuse""".split())
+his hers he high hike highs ideas egg exit exact exactly extra excuse monday tuesday wednesday thursday friday saturday
+sunday january february april june july august september october november december""".split())
 # Mishearings seen in real calls (2026-10-23, out/rooms) that the sound rule alone scores too low or that are in NOT_NAME
-NAME_ALIASES = {"higgs": {"hex", "hix", "hicks", "hics", "ex", "x", "eggs", "pigs", "figs", "higs", "hig", "ahex",
-                          "hugs", "hikes", "things"},
-                "nova": {"noah", "nava", "novo", "nover", "noba", "nola", "noa", "nowa", "nobel"}}
+NAME_ALIASES = {"higgs": {"hex", "hix", "hicks", "hics", "ex", "x", "eggs", "pig", "pigs", "figs", "higs", "hig", "ahex"},
+                "nova": {"noah", "nava", "novo", "nover", "noba", "nola", "noa", "nowa", "nobel"},
+                "max": {"mac", "mack", "macs", "matt", "maks"}}
+_WORDS = {}
+
+
+def english_word(w):
+    """Is `w` an ordinary (lowercase) English word, from the system word list (/usr/share/dict/words, if there is
+    one)? Those only count as the AI's name when they are a known mishearing: "March", "knock", "hugs" sound like
+    "Max", "Nova", "Higgs"; "Noah", "Matt" and "Hix" aren't words and may."""
+    if "set" not in _WORDS:
+        try:
+            with open(os.environ.get("MEET_WORDS", "/usr/share/dict/words")) as f:
+                _WORDS["set"] = {x.strip() for x in f if x.strip().isalpha() and x.strip().islower()}
+        except OSError:
+            _WORDS["set"] = set()
+    return w in _WORDS["set"]
 # "Noah said he'd be late": a name going straight on into one of these is talked about, not called
 NAME_AFTER_WEAK = set("said says is was has had will would thinks told and or are were".split())
 
@@ -377,7 +397,7 @@ def name_like(w, ai, people=(), strong=True):
         return False
     if lw in NAME_ALIASES.get(ai.lower(), ()):
         return True
-    if lw in NOT_NAME or len(lw) < 3:  # "us", "it": only a known mishearing ("Ex", "X")
+    if lw in NOT_NAME or len(lw) < 3 or english_word(lw):  # "us", "it", "knock": only a known mishearing ("Ex")
         return False
     r = sound_sim(lw, ai)
     return r >= (0.6 if strong else 0.8) and not any(sound_sim(lw, p) >= r for p in people)
@@ -390,14 +410,12 @@ def trivial(text):
         w in BACKCHANNEL or w in FILLERS for w in words)
 
 
-def fix_name(text, ai, people=()):
-    """Higgs STT often mishears the AI's name when someone calls it ("Pigs, how should we...", "Hello, hex.", "Hey, hey
-    Noah, how are you?", "As long as we ask first, Hicks, what do you think?": 16 lines in the 2026-10-23 calls, none
-    repaired by the old rule). A word that sounds like the name (`name_like`) becomes the name where people call
-    someone: the first word of a sentence after any greetings ("hey", "okay", "morning"), when a comma or the
-    sentence's end follows it; a word set off by commas; the last word of a sentence; and, if it sounds closer, the
-    first word of a sentence going straight on ("Noah walk us through it", not "Noah said he'd be late")."""
-    spans = []
+def calling_spots(text):
+    """Where in `text` people call someone by name: (start, end, word, spot, led) per word. spot "strong": the first
+    word of a sentence after any greetings ("hey", "okay", "morning") with a comma or the sentence's end after it, or
+    a word set off by commas / after the last comma; "weak": the first word of a sentence going straight on ("Noah walk
+    us through it", not "Noah said he'd be late" or "Hicks Street"), or a capitalized last word ("What do you think
+    Noah?"). led: a greeting or a comma comes before it (its capital is the speaker's, not the sentence's)."""
     for m in re.finditer(r"[^.?!]+[.?!]*", text):
         sent = m.group(0)
         toks = list(re.finditer(r"[A-Za-z][A-Za-z']*", sent))
@@ -412,12 +430,23 @@ def fix_name(text, ai, people=()):
             first = lead and w.lower() not in NAME_LEAD
             if first or w.lower() not in NAME_LEAD:
                 lead = False
-            # STT writes a name it hears with a capital: the last word of "What do you think Noah?", not of "... hear us?"
-            strong = (first and ends) or ("," in before and ends) or (last and i > 0 and w[0].isupper())
-            weak = (first and not ends and nxt not in NAME_AFTER_WEAK and not w.lower().endswith("'s")
-                    and not (not last and toks[i + 1].group(0)[0].isupper() and nxt != "i"))  # "Hicks Street"
-            if (strong or weak) and name_like(w, ai, people, strong=strong):
-                spans.append((m.start() + t.start(), m.start() + t.end()))
+            led = i > 0 and (first or "," in before)
+            if (first and ends) or ("," in before and ends):
+                spot = "strong"
+            elif (first and not ends and nxt not in NAME_AFTER_WEAK and not w.lower().endswith("'s")
+                  and not (not last and toks[i + 1].group(0)[0].isupper() and nxt != "i")) or (last and i > 0 and w[0].isupper()):
+                spot = "weak"
+            else:
+                continue
+            yield m.start() + t.start(), m.start() + t.end(), w, spot, led
+
+
+def fix_name(text, ai, people=()):
+    """Higgs STT often mishears the AI's name when someone calls it ("Pigs, how should we...", "Hello, hex.", "Hey, hey
+    Noah, how are you?", "As long as we ask first, Hicks, what do you think?": 16 lines in the 2026-10-23 calls, none
+    repaired by the old rule). A word that sounds like the name (`name_like`; closer in a weak spot) becomes the name
+    where people call someone (`calling_spots`)."""
+    spans = [(a, b) for a, b, w, spot, _ in calling_spots(text) if name_like(w, ai, people, strong=spot == "strong")]
     for a, b in reversed(spans):
         text = text[:a] + ai + text[b:]
     return text
@@ -428,18 +457,26 @@ def NAME_RE(ai):  # noqa: N802
 
 
 def maybe_named(text, ai, people=()):
-    """Is there a word anywhere in the line that could be the AI's name misheard (fix_name didn't take it: not where
-    people call someone, or too far)? Then waiting for the local second opinion is worth it."""
-    return any(lw not in NOT_NAME and not any(lw == p.lower() for p in people)
-               and (lw in NAME_ALIASES.get(ai.lower(), ()) or sound_sim(lw, ai) >= 0.5)
-               for lw in (w.lower() for w in re.findall(r"[A-Za-z][A-Za-z']*", text)))
+    """Is someone called by a name that isn't anyone here ("Hi, Hank.", "What do you think, Kate?", "Thoma, are we
+    go?": Higgs STT swapping in another name), or by a word a bit like the AI's? Then the local second opinion
+    (name_from_local) is worth waiting for. Rare enough (2026-10-23 calls: see tests/name_stt.py) not to slow lines."""
+    names = {p.lower() for p in people} | {ai.lower()}
+    for _, _, w, spot, led in calling_spots(text):
+        lw = w.lower()
+        if lw in names or lw in NOT_NAME or lw in NAME_LEAD or len(lw) < 2:
+            continue
+        if lw in NAME_ALIASES.get(ai.lower(), ()) or (not english_word(lw) and sound_sim(lw, ai) >= 0.5):
+            return True
+        if spot == "strong" and (w[0].isupper() if led else not english_word(lw)):
+            return True
+    return False
 
 
 # In a group call each line is also transcribed locally with the AI's name as a hotword (from the commit, alongside Higgs
-# STT); when Higgs's transcript has no name, the line waits up to NAME_WAIT s more for that one (name_from_local).
+# STT); when Higgs's transcript has no name but maybe_named, the line waits up to NAME_WAIT s more for it
+# (name_from_local). Whisper encodes a 30 s window whatever the line's length: ~0.6 s idle, 1.4 s on a loaded machine.
 NAME_CHECK = os.environ.get("MEET_NAME_CHECK", "1") == "1"
-NAME_WAIT = float(os.environ.get("MEET_NAME_WAIT", "0.6"))
-NAME_WAIT_ALL = os.environ.get("MEET_NAME_WAIT_ALL", "0") == "1"  # wait on every line without the name, not only maybe_named
+NAME_WAIT = float(os.environ.get("MEET_NAME_WAIT", "0.8"))
 
 
 def name_from_local(text, local, ai, people=()):
@@ -1234,6 +1271,8 @@ class Listener:
             LOCAL_STT.last_fail = time.monotonic()
             t1 = time.perf_counter()
             text = await (local or asyncio.to_thread(LOCAL_STT.transcribe, np.concatenate(audio)))
+            if WHISPER_JUNK.match(text):  # what Whisper says for noise ("you" was judged and nearly answered)
+                text = ""
             room = self.b.a.room
             room.log({"type": "stt_fallback", "slot": self.slot, "name": self.name, "higgs": failed[:120], "text": text,
                       "early": local is not None, "local_s": round(time.perf_counter() - t1, 2),
@@ -1243,7 +1282,7 @@ class Listener:
                 await room.event({"type": "ai_note", "text": "Higgs transcription is failing right now; "
                                                              "lines are transcribed locally (Whisper) until it's back."})
         if named is not None and text and failed is None and NAME_RE(ai).search(fix_name(text, ai, people)) is None \
-                and (NAME_WAIT_ALL or maybe_named(text, ai, people)):
+                and maybe_named(text, ai, people):
             try:  # Higgs's transcript has no name: what whisper heard (it started with the commit)
                 heard = await asyncio.wait_for(asyncio.shield(named), NAME_WAIT)
             except asyncio.TimeoutError:
@@ -1347,6 +1386,7 @@ class ImprovedBrain:
         self.line_no = 0          # id of the newest committed line
         self.pending = None       # Reply waiting for the floor
         self.playing = None       # Reply being heard
+        self.paused = None        # {r, li, t, pos}: a reply just stopped by li, resumed if li only said "mm-hm" (RESUME)
         self.last_out = np.zeros(N, np.int16)
         self.gain = 1.0
         self.last_listener = None
@@ -1437,8 +1477,10 @@ class ImprovedBrain:
             return True
         return any(self.line_by.get(i) == r.listener.slot for i in range(r.line_id + 1, self.line_no + 1))
 
-    def _cancel_pending(self):
+    def _cancel_pending(self, why=None):
         if self.pending:
+            if why:  # a decided reply that won't be said is logged (one went missing silently in a 2026-10-23 call)
+                self.a.room.log({"type": "reply_dropped", "line": self.pending.line_text[:80], "why": why})
             self.pending.cancel = True  # also stops its Avatar render (one at a time per API key)
             self.pending.speaker.cancel()
             self.pending = None
@@ -1510,7 +1552,7 @@ class ImprovedBrain:
                 a.history.remove(frag)
             await a.room.event({"type": "reply_skipped", "line": text[:80], "why": f"cut in: {skip}"})
             return
-        self._cancel_pending()
+        self._cancel_pending("a correction cuts in")
         r = self.pending = Reply(self.line_no, li, text, ans, time.perf_counter(), reader=self.voice())
         r.correction = r.barge = r.addressed = True
         if a.avatar:
@@ -1539,10 +1581,17 @@ class ImprovedBrain:
                                                               "decided_s": 0.0}, True)
                 return
             if self.pending is not None and self.pending.held is li:
-                self._cancel_pending()  # they added something: the whole line is judged again
+                self._cancel_pending("they went on")  # they added something: the whole line is judged again
         if merged:  # they went on after a pause: one line (the transcript panel replaces the fragment)
             text = join_pieces(a.history.pop()["text"], text)
         text, kind = prefilter(text, a.ai, a.history, a.names())
+        if self.paused is not None and kind != "skip":
+            small = kind in ("backchannel", "filler") or trivial(text)
+            if (small and self.paused["li"] is li and self.playing is None and self.pending is None
+                    and time.perf_counter() - self.paused["t"] < PAUSE_S):
+                await self._resume(li, text)
+            elif not small:
+                self._drop_paused()  # a real interruption: they said something
         if kind == "skip":
             return
         cut_i = next((i for i, h in enumerate(a.history) if h is cut), None) if cut is not None else None
@@ -1680,7 +1729,7 @@ class ImprovedBrain:
                 spec.speaker.cancel()
             await a.room.event({"type": "reply_skipped", "line": text[:80], "why": skip})
             return
-        self._cancel_pending()
+        self._cancel_pending("a newer reply")
         if spec:
             spec.close()
             self.pending = spec
@@ -1719,6 +1768,12 @@ class ImprovedBrain:
         if anyone:
             self.voice_at = time.perf_counter()
 
+        if (r := self.pending) is not None and r.closed and not r.audio and time.perf_counter() - r.t_end > STALE_MAX:
+            self._cancel_pending("no speech")  # its voice never came (Realtime and TTS 3 both failed)
+            await self.a.status("listening", dropped="no speech")
+        p = self.paused
+        if p is not None and time.perf_counter() - p["t"] > PAUSE_S and not p["li"].in_flight and not p["li"].speaking:
+            self._drop_paused()
         r = self.pending
         if r is not None and "audio" not in r.marks and len(r.audio) >= N * 2:
             r.marks["audio"] = time.perf_counter()
@@ -1851,12 +1906,18 @@ class ImprovedBrain:
 
     async def _interrupt(self, r, li):
         r.cancel = True
-        r.speaker.cancel()
-        if r.vstarted:
-            await self.a.room.avatar_stop()
         live = live_face(self.a.room)
         pos = max(0, r.pos - int(live.lag * SR)) if live else r.pos  # a live face is heard ~1.3 s after the push
         heard = floor.truncate(r.text, [(a / SR, b / SR, x) for a, b, x in r.speaker.segments], pos / SR)
+        if RESUME and not r.correction and not r.vstarted:
+            # it may have been a "mm-hm" the models missed: if their line comes back as one, go on (on_line ->
+            # _resume); its speech keeps arriving meanwhile
+            self._drop_paused()
+            self.paused = {"r": r, "li": li, "t": time.perf_counter(), "pos": pos}
+        else:
+            r.speaker.cancel()
+        if r.vstarted:
+            await self.a.room.avatar_stop()
         if r.hist_idx is not None and r.hist_idx < len(self.a.history):
             # marked, so the judge and the writer know it was cut off (unmarked, the writer resumed its old answer)
             self.a.history[r.hist_idx]["text"] = f"{heard} [interrupted]"
@@ -1865,6 +1926,36 @@ class ImprovedBrain:
         await self.a.room.ai_flush()
         await self.a.room.ai_gain(1.0)
         await self.a.status("listening", stopped=f"{li.name} interrupted", heard=heard)
+
+    def _drop_paused(self):
+        if self.paused is not None:
+            self.paused["r"].speaker.cancel()
+            self.paused = None
+
+    async def _resume(self, li, text):
+        """li's interruption came back as a backchannel ("Yeah.", "Oh.", "Exactly."; 5 replies in the 2026-10-23 calls
+        were cut off by one): the reply goes on from the start of the sentence it was cut in, as a person would."""
+        p, self.paused = self.paused, None
+        r = p["r"]
+        segs = r.speaker.segments
+        seg = next(((a, b) for a, b, _ in segs if a <= p["pos"] < b), None)
+        if seg is not None and seg[1] - p["pos"] < int(0.4 * SR):  # all but said: from the next one
+            seg = next(((a, b) for a, b, _ in segs if a >= seg[1]), None)
+        at = seg[0] if seg is not None else p["pos"]
+        if at >= len(r.audio) // 2 and r.done:  # it had said everything already
+            r.speaker.cancel()
+            return False
+        r.cancel, r.pos = False, at
+        if r.hist_idx is not None and r.hist_idx < len(self.a.history):
+            self.a.history[r.hist_idx]["text"] = r.text
+        self.playing = r
+        for li2 in self.listeners.values():
+            li2.barge.reset()
+            li2.hold.reset()
+        await self.a.room.event({"type": "ai_resumed", "after": text[:40], "from_s": round(at / SR, 2),
+                                 "paused_s": round(time.perf_counter() - p["t"], 2)})
+        await self.a.status("speaking", resumed=True)
+        return True
 
     async def _render(self, r):
         """Render the reply through Higgs Avatar once its speech is complete. Chunks are held in r.vbuf until the

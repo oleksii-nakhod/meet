@@ -71,6 +71,10 @@ input { font: inherit; color: var(--ink); background: var(--bg); border: 1px sol
 .tile.ai.lk-on video.lk { opacity: 1; }
 .tile.ai.lk-on video.idle, .tile.ai.lk-on video.live { opacity: 0; }
 .tile.ai.lk-on .orb { visibility: hidden; }
+/* interrupted: the face's pipeline still moves its lips for ~1.2 s; a still of it listening covers that */
+.tile.ai canvas.still { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center 30%;
+  opacity: 0; transition: opacity .25s; pointer-events: none; }
+.tile.ai.lk-on.still-on canvas.still { opacity: 1; transition: opacity .08s; }
 .tile.ai .badge { position: absolute; left: 8px; top: 8px; font-size: 12px; font-weight: 650; padding: 2px 9px; border-radius: 99px; background: rgba(0,0,0,.55); border: 1px solid var(--line); color: var(--muted); }
 .tile.ai .badge.improved { color: var(--ok); border-color: var(--ok); }
 .tile.ai .status { position: absolute; right: 8px; top: 8px; font-size: 12px; padding: 2px 9px; border-radius: 99px; background: rgba(0,0,0,.55); color: var(--muted); }

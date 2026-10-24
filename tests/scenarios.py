@@ -238,6 +238,50 @@ SCENARIOS5 = [  # the switch on the call, flipped mid-conversation
         ("say", "Priya", "Higgs, thanks, and what's the most important one?", "reply")]),
 ]
 
+LAUNCH = ["Launch is planned for Thursday at 10 am.", "Go criteria: zero P0 bugs and p95 latency under 300 ms.",
+          "Wei is primary on-call launch week; Dana is secondary."]
+SCENARIOS9 = [  # edges from the 2026-10-23 calls (out/rooms): trailing "Oh.", repeated questions, rudeness, names
+    dict(name="tail_1to1", people=["Alex"], steps=[
+        ("say", "Alex", ["Higgs, what's the capital of Australia?", 0.7, "Oh."], "reply"),
+        ("say", "Alex", ["When do submissions close?", 0.7, "Okay. Yes."], "reply")]),
+    dict(name="tail_group", people=["Alex", "Priya", "Sam"], steps=[
+        ("say", "Alex", ["Higgs, when do submissions close?", 0.7, "Yeah."], "reply"),
+        ("say", "Priya", ["Higgs, how long can the video be?", 0.8, "And can it have music in it?"], "reply")]),
+    dict(name="repeat_ask", people=["Alex", "Priya"], steps=[
+        ("say", "Alex", "Higgs, what do the judges weigh the most?", "reply"),
+        ("say", "Priya", "Sorry, I missed that. Higgs, what do the judges weigh the most?", "reply"),
+        ("say", "Alex", "I said, Higgs, what do the judges weigh the most?", "reply")]),
+    dict(name="rude_1to1", people=["Alex"], steps=[
+        ("say", "Alex", "Higgs, are you dumb? Do you have one brain? Do you have two brains?", "reply"),
+        ("say", "Alex", "Okay, sorry. Higgs, when do submissions close?", "reply"),
+        ("say", "Alex", "And how long can the video be?", "reply")]),
+    dict(name="names_nova", ai="Nova", setting="product launch go/no-go meeting", facts=LAUNCH,
+         people=["Alex", "Priya", "Sam"], steps=[
+             ("say", "Priya", "Hey, hey Nova, how are you?", "reply"),
+             ("say", "Alex", "As long as we ask first, Nova, what do you think we should do about latency?", "reply"),
+             ("say", "Sam", "Nova, say latency is still at 340 on Wednesday. What do you recommend?", "reply"),
+             ("say", "Priya", "Noah said he'd be late today.", "silent"),
+             ("say", "Alex", "Okay, Nova. So, can you sum up the action items?", "reply"),
+             ("say", "Sam", "No, I don't think we're ready yet.", "silent")]),
+    dict(name="names_higgs", people=["Alex", "Priya", "Mei"], steps=[
+        ("say", "Mei", "Okay, house meeting. Hi, Higgs. How are you?", "reply"),
+        ("say", "Alex", "Okay hey Higgs do you know when submissions close?", "reply"),
+        ("say", "Priya", "So we need to cut it down. Higgs, how long can the video actually be?", "reply"),
+        ("say", "Mei", "We need eggs and milk for the weekend.", "silent")]),
+    dict(name="names_max", ai="Max", setting="fast engineering standup", facts=STANDUP,
+         people=["Jordan", "Sam", "Alex"], steps=[
+             ("say", "Jordan", "Max, when is the code freeze?", "reply"),
+             ("say", "Sam", "Hey Max, who owns PAY-418?", "reply"),
+             ("say", "Alex", "Max capacity in the demo room is fifty people.", "silent")]),
+    dict(name="long_bc", people=["Alex"], steps=[
+        ("talk_over", "Alex", LONG_Q, ("Alex", "Yeah, yeah, uh-huh, yeah."), "continue", {"at": 2.0}),
+        ("talk_over", "Alex", "Higgs, what's the riskiest part of our plan?", ("Alex", "Exactly. Yeah. Exactly."), "continue")]),
+    dict(name="long_bc_group", people=["Alex", "Priya"], steps=[
+        ("talk_over", "Alex", LONG_Q, ("Priya", "Mm-hm, mm-hm, yeah, right."), "continue", {"at": 2.0}),
+        ("talk_over", "Priya", "Higgs, what should the last thirty seconds show?",
+         ("Alex", "Sorry, Higgs, stop, we're out of time."), "stop")]),
+]
+
 SCENARIOS = [
     # ---------------- one person and Higgs ----------------
     dict(name="greet_1to1", people=["Alex"], steps=[
@@ -346,7 +390,8 @@ def window_events(b, t0, t1):
     flushes = [round(t, 2) for t, m in ev if m.get("type") == "ai_flush"]
     errors = [m.get("error") for t, m in ev if m.get("type") == "ai_error"]
     errors += [f"skipped: {m.get('why')}" for t, m in ev if m.get("type") == "reply_skipped"]
-    return {"lines": lines, "ai_say": says, "states": states, "flush": flushes, "errors": errors}
+    resumed = [round(t, 2) for t, m in ev if m.get("type") == "ai_resumed"]
+    return {"lines": lines, "ai_say": says, "states": states, "flush": flushes, "errors": errors, "resumed": resumed}
 
 
 def gaps(b, since, min_gap=0.15):
@@ -481,7 +526,10 @@ async def run_step(step, bots_, ear, mode):
         # Higgs answering the cue as a new turn (plain Higgs does): audio that starts after the stop
         answered_cue = [round(a - t_c_end, 2) for a, _ in spans[1:] if a > t_c]
         got = "stopped" if stopped else "continued"
-        row.update(got=got, ok=(got == "stopped") == (expect == "stop"), cue_at=round(t_c - on, 2),
+        if stopped and ev["resumed"]:  # stopped, then its line came back as a backchannel: it went on (agent._resume)
+            got = "stopped, resumed"
+        ok = (got == "stopped") == (expect == "stop")
+        row.update(got=got, ok=ok, cue_at=round(t_c - on, 2),
                    stop_latency=round(ev["flush"][0] - t_c, 2) if ev["flush"] else None,
                    first_reply_len=round(first_end - on, 2), answered_cue_after=answered_cue[:1])
         await wait_quiet(ear, 1.2, 30)
@@ -622,7 +670,7 @@ async def main_async(a):
     outdir = os.path.join(MEET, "out", "scen", a.tag)
     os.makedirs(outdir, exist_ok=True)
     pool = {"1": SCENARIOS, "2": SCENARIOS2, "3": SCENARIOS3, "4": SCENARIOS4, "5": SCENARIOS5, "6": SCENARIOS6, "7": SCENARIOS7,
-            "8": SCENARIOS8,
+            "8": SCENARIOS8, "9": SCENARIOS9,
             "all": SCENARIOS + SCENARIOS2}[a.set]
     todo = [(sc, m) for sc in pool if not a.only or sc["name"] in a.only for m in a.modes
             if m in sc.get("modes", ("default", "improved"))]
@@ -677,7 +725,7 @@ def main():
     ap.add_argument("--modes", nargs="+", default=["improved", "default"])
     ap.add_argument("--only", nargs="*")
     ap.add_argument("--servers", type=int, default=0, help="servers to spread the rooms over (default: one per room)")
-    ap.add_argument("--set", default="1", choices=["1", "2", "3", "4", "5", "6", "7", "8", "all"])
+    ap.add_argument("--set", default="1", choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "all"])
     ap.add_argument("--par", type=int, default=4)
     ap.add_argument("--port", type=int, default=8641)
     ap.add_argument("--samples", type=int, default=0, help="judge samples per line (0: the agent's default)")

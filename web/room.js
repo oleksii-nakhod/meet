@@ -185,7 +185,7 @@ function makeTile(slot) {
   t.className = "tile"; t.dataset.slot = slot;
   if (slot === 0) {
     t.classList.add("ai");
-    t.innerHTML = `<video class="idle" muted playsinline loop></video><video class="live" muted playsinline></video><video class="lk" muted playsinline autoplay></video>
+    t.innerHTML = `<video class="idle" muted playsinline loop></video><video class="live" muted playsinline></video><video class="lk" muted playsinline autoplay></video><canvas class="still"></canvas>
       <div class="orb"><div class="ring"></div><span></span></div><div class="badge"></div><div class="status"></div>
       <div class="cap"></div><div class="name"></div>`;
   } else {
@@ -259,6 +259,7 @@ function lab(m) {
 function onAiState(m) {
   const prev = W.ai;
   W.ai = { mode: m.mode ?? prev.mode, avatar: m.avatar ?? prev.avatar, status: m.status ?? prev.status };
+  if (prev.status === "speaking" || W.ai.status === "speaking") live.talkedAt = performance.now(); // liveSnap
   if (m.by && W.ai.mode !== prev.mode) toast(`${m.by} switched ${aiName} to ${MODE_LABEL[W.ai.mode]}`, "mode");
   if (W.ai.status === "connecting" && prev.status !== "connecting") toast(`${aiName} is reconnecting…`, "mode");
   if (m.by && W.ai.avatar !== prev.avatar) toast(`${m.by} turned ${aiName}'s avatar ${W.ai.avatar ? "on" : "off"}`, "mode");
@@ -403,7 +404,8 @@ function avatarIdle(url) {
 // Live face (live_avatar.py): a Boson avatar in a LiveKit room, joined subscribe-only with the token the server sends.
 // It is heard ~1.3 s after the server sends slot 0's audio, and after ai_flush the avatar's pipeline still plays
 // ~1.2 s, so a flush mutes it here for `drain` s.
-const live = { room: null, info: null, audio: null, video: null, gain: 1, mutedUntil: 0, timer: null };
+const live = { room: null, info: null, audio: null, video: null, gain: 1, mutedUntil: 0, timer: null, still: false,
+  talkedAt: 0, snapper: null };
 function loadLivekit() {
   if (window.LivekitClient) return Promise.resolve();
   return (loadLivekit.p ||= new Promise((ok, bad) => {
@@ -447,7 +449,9 @@ async function liveAvatar(m) {
 }
 function liveOff() {
   const r = live.room;
-  Object.assign(live, { room: null, info: null, audio: null, video: null });
+  clearInterval(live.snapper);
+  Object.assign(live, { room: null, info: null, audio: null, video: null, still: false, snapper: null });
+  tiles[0]?.classList.remove("still-on");
   if (r) r.disconnect();
   $("lkaudio")?.replaceChildren();
   tiles[0]?.classList.remove("lk-on");
@@ -460,6 +464,8 @@ function liveAttach() { // the video track can arrive before the AI tile exists
   if (!live.video || !v || v.srcObject) return;
   live.video.attach(v); v.play().catch(() => {});
   tiles[0].classList.add("lk-on");
+  clearInterval(live.snapper);
+  live.snapper = setInterval(liveSnap, 1000);
 }
 function liveVolume() {
   if (!live.audio) return;
@@ -469,10 +475,20 @@ function liveVolume() {
 function liveFlush() {
   if (!live.audio) return;
   W.live.flushes++;
-  live.mutedUntil = performance.now() + 1000 * (live.info?.drain ?? 1.25);
+  const drain = 1000 * (live.info?.drain ?? 1.25);
+  live.mutedUntil = performance.now() + drain;
   liveVolume();
+  // the lips would go on silently for the drain: show the face as it last listened, then the live face again
+  if (live.still) tiles[0]?.classList.add("still-on");
   clearTimeout(live.timer);
-  live.timer = setTimeout(liveVolume, 1000 * (live.info?.drain ?? 1.25) + 20);
+  live.timer = setTimeout(() => { liveVolume(); tiles[0]?.classList.remove("still-on"); }, drain + 20);
+}
+function liveSnap() { // a still of the live face while it listens (mouth closed), for liveFlush
+  const v = tiles[0]?.querySelector("video.lk"), c = tiles[0]?.querySelector("canvas.still");
+  if (!live.video || !v || !c || !v.videoWidth || W.ai.status === "speaking") return;
+  if (performance.now() - live.talkedAt < 3000 || tiles[0].classList.contains("still-on")) return; // still saying the end
+  if (c.width !== v.videoWidth) { c.width = v.videoWidth; c.height = v.videoHeight; }
+  try { c.getContext("2d").drawImage(v, 0, 0, c.width, c.height); live.still = true; } catch { /* not ready */ }
 }
 document.addEventListener("click", () => live.room && !live.room.canPlaybackAudio && live.room.startAudio().catch(() => {}));
 
