@@ -428,6 +428,9 @@ VOICE_RT = os.environ.get("MEET_SPEECH", os.environ.get("MEET_AVATAR_VOICE", "re
 READER = ("You are a text-to-speech engine. Read the user's text aloud exactly as written, word for word, in a natural "
           "conversational voice. Say nothing else: no greeting, no comment, no question.")
 SPLIT_MIN_S = 5.5  # render the first >= 5.5 s of a long reply first (Read My Lips: the second part's face is ready in time)
+# The Realtime voice starts reading a speculated reply as soon as its draft is complete and passes the checks, not
+# once the judge has decided (it decided ~0.4 s after the draft was done, then reading took ~0.5 s more).
+EARLY_READ = os.environ.get("MEET_EARLY_READ", "1") == "1"
 RT_FIRST_S = 2.0   # no Realtime speech this long after asking (~0.6 s normally; a voice session still opening under
 #                    load took 12 s): TTS 3 voices the reply instead
 
@@ -742,20 +745,28 @@ class Pool:
 
 class RealtimeSpeaker:
     """SentenceSpeaker's interface (feed / close / cancel / segments), voiced by a Realtime session reading the whole
-    reply once its text is complete (Pool.speak); falls back to TTS 3 if that fails."""
+    reply once its text is complete (Pool.speak); falls back to TTS 3 if that fails. start() reads it before close()
+    (the draft is complete but the judge hasn't decided yet: Reply.start_early)."""
 
     def __init__(self, pool, audio, on_done):
         self.pool, self.audio, self.on_done = pool, audio, on_done
         self.text, self.cancelled, self.closed, self.fallback, self.finished = "", False, False, None, False
+        self.started = False
 
     def feed(self, delta):
-        self.text += delta
+        if not self.started:
+            self.text += delta
+
+    def start(self):
+        if not (self.started or self.cancelled):
+            self.started = True
+            asyncio.ensure_future(self._run())
 
     def close(self):
         if self.closed:
             return
         self.closed = True
-        asyncio.ensure_future(self._run())
+        self.start()
 
     def cancel(self):
         self.cancelled = self.closed = True
@@ -1145,6 +1156,17 @@ class Reply:
         self.text += delta
         self.speaker.feed(delta)
 
+    def start_early(self):
+        """Its draft is complete: a Realtime voice starts reading it now, while the judge still decides (~0.5 s of
+        reading latency off the reply; a "no" cancels it). Text and checks are unchanged: close() still follows."""
+        if not self.rt or self.closed:
+            return
+        if self.head:  # a reply shorter than the label check
+            h, self.head, self.label = self.head, "", None
+            self.feed(h)
+        self.marks["read"] = time.perf_counter()
+        self.speaker.start()
+
     def close(self):
         if self.head and not self.closed:  # a reply shorter than the label check
             h, self.head, self.label = self.head, "", None
@@ -1383,6 +1405,16 @@ class ImprovedBrain:
             spec = Reply(line_id, li, text, None, t_end, one=one, ai=a.ai, reader=reader)
         writer = pools["write"] if facts_relevant(text, context[-2:], a.facts, [a.ai] + a.names()) else pools["write0"]
         draft = asyncio.ensure_future(writer.ask(convo, retries=1, on_delta=spec.feed if spec else None))
+        if spec and spec.rt and EARLY_READ:
+            def read_now(f, spec=spec):  # the checks below that would replace this draft, done now on its text
+                ans = "" if f.cancelled() or f.exception() else re.sub(
+                    rf"^\s*{re.escape(a.ai)}\s*:\s*", "", f.result().strip().strip('"'), flags=re.I)
+                mine = [] if REPEAT_ASK.search(text) else [h["text"] for h in a.history if h["speaker"] == a.ai][-3:]
+                said = re.sub(rf"^\s*{re.escape(a.ai)}\s*:\s*", "", (spec.text + spec.head).strip().strip('"'), flags=re.I)
+                if (ans and said == ans and not echoes(ans, text) and not VOLUNTEERS.search(ans)
+                        and not repeats(ans, mine)):
+                    spec.start_early()
+            draft.add_done_callback(read_now)
         # both drafts start with the decision, so a correction costs no extra wait (rewriting it after: ~1 s)
         cdraft = asyncio.ensure_future(pools["write"].ask(CORRECT.format(ai=a.ai) + convo, retries=1)) if a.facts else None
         speak, d = await decide(r, lambda kind, _sys, user, _i: pools[kind].ask(user), samples=self.samples, prompt=PROMPT)
@@ -1582,7 +1614,7 @@ class ImprovedBrain:
                 r.started = True
                 m, now = r.marks, time.perf_counter()
                 t0 = m.get("speech_end", r.t_end)
-                timing = {k: round(m[k] - t0, 2) for k in ("commit", "transcript", "decided", "draft", "created", "audio",
+                timing = {k: round(m[k] - t0, 2) for k in ("commit", "transcript", "decided", "draft", "created", "read", "audio",
                                                             "render", "filler", "video") if k in m}
                 timing["play"] = round(now - t0, 2)
                 timing["speculated"] = bool(m.get("speculated"))
